@@ -63,6 +63,176 @@ def _serialize(doc: dict | None, drop_fields: list[str] | None = None) -> dict |
     return doc
 
 
+# ---------- Analyst self-learning feedback loop ----------
+def _norm_str(v) -> str:
+    return " ".join(str(v or "").split()).strip().lower()
+
+
+def _norm_list(v) -> list[str]:
+    if not v:
+        return []
+    return [_norm_str(x) for x in v if _norm_str(x)]
+
+
+def _norm_customs(rows) -> dict[str, str]:
+    if not rows:
+        return {}
+    out: dict[str, str] = {}
+    for r in rows or []:
+        k = _norm_str((r or {}).get("key"))
+        val = _norm_str((r or {}).get("value"))
+        if k:
+            out[k] = val
+    return out
+
+
+def _norm_analysis(lines) -> list[str]:
+    if not lines:
+        return []
+    return [_norm_str((ln or {}).get("text")) for ln in lines if _norm_str((ln or {}).get("text"))]
+
+
+def _mssp_meaningful_diff(old: dict | None, new: dict | None) -> dict:
+    """Return which meaningful fields changed between old and new MSSP report.
+    Meaningful = verdict flip, verdict_reason change, recommendations set change,
+    custom_fields set change, analysis_lines set change, or analyst_notes with
+    at least 10 chars of new content."""
+    old = old or {}
+    new = new or {}
+    changes: dict = {}
+    if _norm_str(old.get("verdict")) != _norm_str(new.get("verdict")):
+        changes["verdict"] = {"from": old.get("verdict"), "to": new.get("verdict")}
+    if _norm_str(old.get("verdict_reason")) != _norm_str(new.get("verdict_reason")):
+        changes["verdict_reason"] = {"from": old.get("verdict_reason"), "to": new.get("verdict_reason")}
+    new_notes = _norm_str(new.get("analyst_notes"))
+    old_notes = _norm_str(old.get("analyst_notes"))
+    if new_notes and new_notes != old_notes and len(new_notes) >= 10:
+        changes["analyst_notes"] = {"from": old.get("analyst_notes"), "to": new.get("analyst_notes")}
+    if _norm_list(old.get("recommendations")) != _norm_list(new.get("recommendations")):
+        changes["recommendations"] = {"from": old.get("recommendations") or [], "to": new.get("recommendations") or []}
+    if _norm_customs(old.get("custom_fields")) != _norm_customs(new.get("custom_fields")):
+        changes["custom_fields"] = {"from": old.get("custom_fields") or [], "to": new.get("custom_fields") or []}
+    if _norm_analysis(old.get("analysis_lines")) != _norm_analysis(new.get("analysis_lines")):
+        changes["analysis_lines"] = {"from": old.get("analysis_lines") or [], "to": new.get("analysis_lines") or []}
+    return changes
+
+
+def _build_feedback_document(offense: dict, new_mssp: dict, changes: dict, editor_email: str) -> str:
+    """Build a rich text document that captures the analyst's correction so it can
+    be retrieved by future investigations of similar offenses."""
+    lines: list[str] = []
+    lines.append(f"ANALYST FEEDBACK — offense: {offense.get('description','')}")
+    lines.append(f"Client: {offense.get('client_id','')}")
+    if offense.get("rules"):
+        lines.append(f"Detection rules: {', '.join(offense.get('rules') or [])}")
+    if offense.get("categories"):
+        lines.append(f"Categories: {', '.join(offense.get('categories') or [])}")
+    if offense.get("severity_label"):
+        lines.append(f"Severity: {offense.get('severity_label')}")
+    if offense.get("source_ips"):
+        lines.append(f"Source IPs: {', '.join(str(x) for x in (offense.get('source_ips') or [])[:10])}")
+    if offense.get("usernames"):
+        lines.append(f"Usernames: {', '.join(str(x) for x in (offense.get('usernames') or [])[:10])}")
+
+    ai_orig = offense.get("ai_analysis") or {}
+    if ai_orig.get("recommended_action"):
+        lines.append(f"Original AI recommendation: {ai_orig.get('recommended_action')}")
+    if offense.get("risk_score") is not None:
+        lines.append(f"Original AI risk score: {offense.get('risk_score')}")
+
+    lines.append("")
+    lines.append("ANALYST-CONFIRMED FINDINGS:")
+    if new_mssp.get("verdict"):
+        lines.append(f"Verdict: {new_mssp.get('verdict')}")
+    if new_mssp.get("verdict_reason"):
+        lines.append(f"Verdict reason: {new_mssp.get('verdict_reason')}")
+    if new_mssp.get("recommendations"):
+        lines.append("Recommendations:")
+        for r in new_mssp.get("recommendations") or []:
+            lines.append(f"  - {r}")
+    if new_mssp.get("analyst_notes"):
+        lines.append(f"Analyst notes: {new_mssp.get('analyst_notes')}")
+    if new_mssp.get("analysis_lines"):
+        lines.append("Analysis:")
+        for ln in new_mssp.get("analysis_lines") or []:
+            t = (ln or {}).get("text")
+            if t:
+                lines.append(f"  {ln.get('n','-')}. {t}")
+    if new_mssp.get("custom_fields"):
+        lines.append("Custom context:")
+        for cf in new_mssp.get("custom_fields") or []:
+            k = (cf or {}).get("key"); v = (cf or {}).get("value")
+            if k:
+                lines.append(f"  {k}: {v}")
+
+    lines.append("")
+    lines.append(f"Fields changed by analyst: {', '.join(sorted(changes.keys()))}")
+    lines.append(f"Edited by: {editor_email}")
+    lines.append(f"Edited at: {_now()}")
+    return "\n".join(lines)
+
+
+def _chunk_for_rag(text: str, size: int = 600) -> list[str]:
+    text = text.strip()
+    if len(text) <= size:
+        return [text]
+    chunks: list[str] = []
+    buf: list[str] = []
+    ln_total = 0
+    for line in text.splitlines():
+        if ln_total + len(line) + 1 > size and buf:
+            chunks.append("\n".join(buf))
+            buf = []
+            ln_total = 0
+        buf.append(line)
+        ln_total += len(line) + 1
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks
+
+
+async def _ingest_analyst_feedback(offense: dict, new_mssp: dict, changes: dict, editor_email: str):
+    """Persist an analyst's MSSP edits both as a KB entry (visible row) and as
+    a vector-indexed document so future investigations retrieve this correction."""
+    try:
+        client_id = offense.get("client_id")
+        if not client_id:
+            return
+        text = _build_feedback_document(offense, new_mssp, changes, editor_email)
+        chunks = _chunk_for_rag(text)
+        source = f"feedback-{offense.get('id','')[:8]}-{int(datetime.now(timezone.utc).timestamp())}"
+        summary = f"Analyst-corrected findings on '{(offense.get('description') or '')[:60]}' — fields: {', '.join(sorted(changes.keys()))}"
+
+        entry = KBEntry(
+            client_id=client_id,
+            kb_type="analyst_feedback",
+            filename=source,
+            content_summary=summary[:500],
+            document_count=len(chunks),
+            status="PROCESSING",
+            file_size_bytes=len(text.encode("utf-8")),
+            uploaded_by=editor_email,
+        )
+        await db.kb_entries.insert_one(entry.model_dump())
+
+        loop = asyncio.get_event_loop()
+        added = await loop.run_in_executor(
+            None, rag_store.add_documents, client_id, "analyst_feedback", source, chunks
+        )
+        await db.kb_entries.update_one(
+            {"id": entry.id},
+            {"$set": {"status": "READY" if added else "FAILED",
+                      "document_count": added,
+                      "completed_at": _now(),
+                      "error": None if added else "RAG store unavailable"}},
+        )
+        await _audit(editor_email, "learn", "analyst_feedback", offense.get("id"),
+                     {"chunks": added, "changes": list(changes.keys())})
+    except Exception as e:
+        logger.warning("Analyst feedback ingest failed for offense %s: %s", offense.get("id"), e)
+
+
+
 # ---------- Tenant scoping ----------
 ROLES_UNRESTRICTED = {UserRole.ADMIN, UserRole.SOC_MANAGER}
 
@@ -555,6 +725,16 @@ async def close_offense(offense_id: str, req: OffenseCloseRequest,
         "severity_label": off.get("severity_label"),
         "created_at": _now(),
     })
+    # Self-learning signal: analyst closed without editing the MSSP report → treat
+    # as confirmation the AI response was accurate (per user choice #3c we only
+    # increment a counter here; no KB doc, no vector index).
+    if off.get("ai_analysis") and not off.get("mssp_edited"):
+        await db.offenses.update_one(
+            {"id": offense_id},
+            {"$inc": {"accurate_confirmations": 1},
+             "$set": {"last_accurate_confirmation_at": _now(),
+                      "last_accurate_confirmation_by": user["email"]}},
+        )
     return await db.offenses.find_one({"id": offense_id}, {"_id": 0})
 
 
@@ -604,6 +784,14 @@ async def _apply_status_change(offense_id: str, new_status: str, user_email: str
     await db.offenses.update_one({"id": offense_id}, {"$set": updates})
     await _audit(user_email, f"status_change:{new_status}", "offense", offense_id,
                  {"comments_len": len(closure_comments or "")})
+    # Self-learning: closed without editing MSSP report = AI response confirmed accurate.
+    if new_status == "CLOSED" and off.get("ai_analysis") and not off.get("mssp_edited"):
+        await db.offenses.update_one(
+            {"id": offense_id},
+            {"$inc": {"accurate_confirmations": 1},
+             "$set": {"last_accurate_confirmation_at": _now(),
+                      "last_accurate_confirmation_by": user_email}},
+        )
     return await db.offenses.find_one({"id": offense_id}, {"_id": 0})
 
 
@@ -814,6 +1002,15 @@ async def offense_action(offense_id: str, req: OffenseActionRequest,
         raise HTTPException(400, "Unknown action")
     await db.offenses.update_one({"id": offense_id}, {"$set": updates})
     await _audit(user["email"], action, "offense", offense_id, {"reason": req.reason})
+
+    # Self-learning: approve/close without editing MSSP report → AI response confirmed accurate.
+    if action in ("approve", "close") and off_before.get("ai_analysis") and not off_before.get("mssp_edited"):
+        await db.offenses.update_one(
+            {"id": offense_id},
+            {"$inc": {"accurate_confirmations": 1},
+             "$set": {"last_accurate_confirmation_at": _now(),
+                      "last_accurate_confirmation_by": user["email"]}},
+        )
 
     # Record analyst feedback for Coach
     fb = {
@@ -1323,6 +1520,7 @@ async def edit_mssp_report(offense_id: str, req: MsspReportUpdate,
     _assert_tenant_access(user, off.get("client_id"))
     ai = off.get("ai_analysis") or {}
     mssp = ai.get("mssp_report") or {}
+    old_mssp = dict(mssp)  # snapshot BEFORE applying edits so we can diff
     # Merge caller-supplied overrides
     if req.fields:
         # Only allow known top-level string fields to change
@@ -1367,15 +1565,26 @@ async def edit_mssp_report(offense_id: str, req: MsspReportUpdate,
     mssp["edited_by"] = user["email"]
     mssp["edited_at"] = _now()
     ai["mssp_report"] = mssp
-    await db.offenses.update_one({"id": offense_id},
-                                 {"$set": {"ai_analysis": ai, "last_updated": _now()}})
+    # Compute meaningful diff for self-learning KB update
+    changes = _mssp_meaningful_diff(old_mssp, mssp)
+    set_fields = {"ai_analysis": ai, "last_updated": _now()}
+    if changes:
+        set_fields["mssp_edited"] = True
+        set_fields["mssp_last_edited_by"] = user["email"]
+        set_fields["mssp_last_edited_at"] = _now()
+    await db.offenses.update_one({"id": offense_id}, {"$set": set_fields})
     await _audit(user["email"], "edit", "mssp_report", offense_id,
                  {"has_fields": bool(req.fields),
                   "custom_count": len(mssp.get("custom_fields") or []) if req.custom_fields is not None else None,
                   "has_analysis": req.analysis_lines is not None,
                   "has_recs": req.recommendations is not None,
                   "has_verdict": req.verdict is not None,
-                  "has_notes": req.analyst_notes is not None})
+                  "has_notes": req.analyst_notes is not None,
+                  "meaningful_changes": list(changes.keys())})
+    # Fire-and-forget: ingest the corrected findings into the tenant KB so
+    # future investigations retrieve this analyst's correction.
+    if changes:
+        asyncio.create_task(_ingest_analyst_feedback(off, mssp, changes, user["email"]))
     return await db.offenses.find_one({"id": offense_id}, {"_id": 0})
 
 
