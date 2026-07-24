@@ -647,6 +647,41 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
                                           llm_narrative=narrative, ti_settings=ti_cfg,
                                           learned_adjustments=learned_adjustments)
 
+    # --- LLM-driven MSSP report (best-effort; falls back to rule engine on any failure) ---
+    if llm_cfg.get("enable_llm"):
+        try:
+            import llm_engine  # local import — heavy transformers stack, lazy load
+            rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
+            model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-3B-Instruct"
+            timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 180)
+            temperature = float(llm_cfg.get("temperature") or 0.3)
+            # Run the CPU-bound LLM chain off the event loop so the endpoint
+            # remains responsive during token generation.
+            loop = asyncio.get_event_loop()
+            llm_mssp = await loop.run_in_executor(
+                None,
+                llm_engine.build_llm_mssp_report,
+                doc, doc.get("events") or [], kb_matches, rule_engine_mssp,
+                model_name, temperature, timeout,
+            )
+            if llm_mssp:
+                analysis["mssp_report"] = llm_mssp
+                analysis["mssp_report_source"] = "llm"
+            else:
+                # Explicit fallback stamp so analysts/admins can see why.
+                reason = llm_engine.load_error() or "invalid_output_or_timeout"
+                analysis["mssp_report"] = analysis.get("mssp_report") or {}
+                analysis["mssp_report"]["generated_by"] = f"rule-engine (LLM fallback: {reason})"
+                analysis["mssp_report_source"] = "rule-engine-fallback"
+                logger.warning("LLM MSSP report unavailable — falling back for offense %s: %s",
+                               offense_id, reason)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("LLM MSSP pipeline errored for offense %s: %s — falling back.",
+                           offense_id, e)
+            analysis["mssp_report"] = analysis.get("mssp_report") or {}
+            analysis["mssp_report"]["generated_by"] = f"rule-engine (LLM fallback: {e})"
+            analysis["mssp_report_source"] = "rule-engine-fallback"
+
     updates = {
         "ai_analysis": analysis,
         "risk_score": analysis["risk_score"],

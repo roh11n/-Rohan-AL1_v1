@@ -169,12 +169,13 @@ class QRadarSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     provider: str = "local"  # local | huggingface | ollama
-    model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_name: str = "Qwen/Qwen2.5-3B-Instruct"
     endpoint_url: str = ""
     api_token: str = ""
     max_tokens: int = 512
     temperature: float = 0.3
     enable_llm: bool = False  # off by default - uses rule engine
+    llm_step_timeout_seconds: int = 180  # per-step timeout for LLM inference (CPU)
 
 
 class IntegrationCred(BaseModel):

@@ -1,0 +1,25 @@
+{
+  "summary": "Backend testing of the LLM-driven MSSP report feature complete. All 5 scenarios from the review request passed (5/5): LLM off = rule-engine unchanged; LLM on + mocked success = mssp_report replaced with generated_by starting 'llm:' and mssp_report_source='llm' while risk_score/mitre_techniques/iocs/recommendation/confidence/kb_matches/similar_incidents remained identical to the rule-engine baseline; LLM on + mocked failure = silent fallback with generated_by starting 'rule-engine (LLM fallback:' and mssp_report_source='rule-engine-fallback' (HTTP 200, no 5xx); _weighted_kb_context unit test confirms analyst_feedback @ sim 0.3 ranks above historical_incident @ sim 0.4 (2x boost); analyst_feedback KB self-learning regression (from iteration_2) still creates a new KB row on meaningful mssp-report edits.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_llm_mssp.py",
+    "/app/test_reports/pytest/llm_mssp.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "llm_engine._chat_with_timeout uses ThreadPoolExecutor(max_workers=1) with a hard timeout, but a timed-out torch.generate() keeps running in the worker thread — a subsequent request will block on the executor queue for the full remaining generation. Consider using a `torch.no_grad` stopping-criteria based token budget rather than relying purely on wall-clock cancel, or spawning per-call subprocesses.",
+    "server.py investigate branch (lines 651-683) re-imports llm_engine every call; fine for correctness but adds transformers import overhead once per process — pre-warm at startup when llm.enable_llm=true to avoid the first-request stall.",
+    "On failure the fallback stamps generated_by on analysis['mssp_report'] but the underlying rule-engine report is unchanged; if the rule engine ever returns None/{} the stamp lands on an empty dict — currently harmless but consider guaranteeing a minimal skeleton.",
+    "Regression risk: any future refactor that changes when the LLM branch runs (e.g. before analyze_offense) must preserve the invariant that risk_score/mitre_techniques/iocs/recommendation/confidence/kb_matches/similar_incidents come strictly from the rule engine. Adding an explicit assertion or a short comment banner in server.py would help.",
+    "server.py is now 1659 lines — split off `offense_routes.py`, `settings_routes.py`, `kb_routes.py` for maintainability."
+  ],
+  "updated_files": ["/app/backend/tests/test_llm_mssp.py"],
+  "success_rate": {"backend": "100%", "frontend": "not tested (per request)"},
+  "test_credentials": "admin@socpilot.ai / Admin@SOCPilot2026",
+  "seed_data_creation": "Used pre-seeded ACME offenses. Test run investigated 3 offenses and created 1 new analyst_feedback KB row (for the regression check). Settings PUT with llm.enable_llm=false was performed at end to restore default state.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Because we cannot download the real Qwen2.5-3B-Instruct in this container, HTTP-level testing was done by temporarily replacing /app/backend/llm_engine.py with a shim that re-exports everything from llm_engine_orig.py and overrides build_llm_mssp_report to consult a `/tmp/llm_mock_mode` file (values: success | fail | off). This lets us flip modes between tests without any additional reloads. The mock is swapped in in an autouse module fixture and the original file is restored in teardown. Verified restore afterwards: llm_engine.py contains the original module and no llm_engine_orig.py leftover. Settings restored to llm.enable_llm=false. The pytest.ini forces `-n 2 --dist loadscope`, but this test suite mutates global backend state (settings + swapped llm_engine.py) so it MUST be run with `-n 0` (as done). The unit test for _weighted_kb_context imports `llm_engine_orig` directly (which is only present while the mock is active), so keep it inside the same test module.",
+  "rca of the issue": "No bug — feature works as specified. Only test-side issue encountered was that the settings endpoint is PUT (not PATCH) and requires a full Settings body; test was updated to GET-then-PUT with mutated llm block."
+}
