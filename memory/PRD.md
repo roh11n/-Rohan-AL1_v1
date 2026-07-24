@@ -71,3 +71,11 @@ See `/app/memory/CHANGELOG.md` for the full history. Highlights:
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`.
+
+### 2026-07-24
+- **Self-learning KB from MSSP edits** (this session).
+  - `PATCH /api/offenses/{id}/mssp-report` now computes a meaningful diff (verdict / verdict_reason / recommendations / custom_fields / analysis_lines set-changes; analyst_notes ≥10 chars of new content). If any changed, a summary document — original offense context + analyst-confirmed findings + edited fields — is chunked and ingested into the per-tenant Chroma RAG collection AND surfaced as a visible KB row with `kb_type="analyst_feedback"` and status READY. Ingest runs as a fire-and-forget asyncio task.
+  - `/close` (both the dedicated `/offenses/{id}/close` and the generic `/offenses/{id}/status` → CLOSED path) and `/offenses/{id}/action` (approve|close) now bump `accurate_confirmations` and stamp `last_accurate_confirmation_by/_at` on the offense **iff** it had `ai_analysis` and was NOT edited by an analyst (`mssp_edited` unset). No KB doc, no vector index — counter-only per user choice #3c.
+  - Editing the MSSP report sets `mssp_edited=true` on the offense so a later close does not double-count as confirmation.
+  - Future investigations retrieve these `feedback-*` chunks via the existing `rag_store.query()` call in `/api/offenses/{id}/investigate`, so the model self-improves per tenant over time.
+  - Backlog note: successive meaningful edits on the same offense create multiple `analyst_feedback` KB rows. Dedupe/update-in-place is a P2 nice-to-have.
