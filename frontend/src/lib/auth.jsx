@@ -30,7 +30,12 @@ export const AuthProvider = ({ children }) => {
       window.dispatchEvent(new Event("socpilot_login"));
       return { ok: true };
     } catch (e) {
-      return { ok: false, error: e?.response?.data?.detail || "Login failed" };
+      const d = e?.response?.data?.detail;
+      let msg = "Login failed";
+      if (typeof d === "string") msg = d;
+      else if (Array.isArray(d)) msg = d.map((x) => x?.msg || String(x)).join("; ");
+      else if (d && typeof d === "object") msg = d.msg || JSON.stringify(d);
+      return { ok: false, error: msg };
     } finally {
       setLoading(false);
     }

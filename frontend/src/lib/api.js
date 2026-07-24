@@ -22,6 +22,16 @@ api.interceptors.response.use(
         window.location.href = "/login";
       }
     }
+    // Normalize FastAPI 422 validation errors: detail may be an array of
+    // objects {type, loc, msg, input, ctx}. Toast/React can't render those.
+    const d = err?.response?.data?.detail;
+    if (Array.isArray(d)) {
+      err.response.data.detail = d.map((x) =>
+        x && typeof x === "object" ? (x.msg || JSON.stringify(x)) : String(x)
+      ).join("; ");
+    } else if (d && typeof d === "object") {
+      err.response.data.detail = d.msg || JSON.stringify(d);
+    }
     return Promise.reject(err);
   }
 );

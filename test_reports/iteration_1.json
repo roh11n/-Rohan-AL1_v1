@@ -1,0 +1,41 @@
+{
+  "summary": "Frontend-only verification of the /login React crash bug ('Objects are not valid as a React child') on SOCPilot AI. Reproduced all three invalid-input scenarios plus admin/analyst regressions. Bug is FIXED — no React error overlay in any case, toast shows a readable string in all three failure paths. Admin and analyst logins succeed; /offenses and /settings load cleanly.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Layout header client selector (post-login, all authenticated pages)", "issues": ["React console warning: 'In HTML, <span> cannot be a child of <option>' — hydration warning coming from Layout.jsx line ~122 <select><option> where a <span> is being rendered inside <option>. Not fatal but pollutes console on every authenticated route. Likely an editor/instrumentation artifact (x-ve-dynamic span) that should not be rendered into <option>."]}
+    ]
+  },
+  "test_scenarios_verified": {
+    "bug_repro": [
+      {"case": "empty email + empty password", "react_crash": false, "toast": "value is not a valid email address: An email address must have an @-sign."},
+      {"case": "invalid-format email 'foo' + password '123'", "react_crash": false, "toast": "shown (validation string)"},
+      {"case": "valid email format wrong creds 'wrong@test.com'/'wrongpw'", "react_crash": false, "toast": "Invalid credentials"}
+    ],
+    "regressions": {
+      "admin_login": "PASS — navigated to / and Dashboard rendered with all 9 side-nav items (Dashboard, Offenses, Tickets, Analyst Coach, Knowledge Base, Clients, Users & RBAC, Audit Logs, Settings).",
+      "analyst_login": "PASS — navigated to /.",
+      "offenses_page": "PASS — /offenses loaded for ACME tenant, no React crash, offense rows present.",
+      "settings_page": "PASS — /settings loaded, no crash."
+    }
+  },
+  "test_report_links": [],
+  "action_items": [
+    "OPTIONAL: Clean up Layout.jsx select/option to remove the stray <span> child inside <option> that triggers a hydration console warning on every authenticated page (unrelated to the login bug, but noisy)."
+  ],
+  "critical_code_review_comments": [
+    "api.js interceptor correctly flattens FastAPI 422 detail array/object into a string before rejecting — good defensive fix.",
+    "auth.jsx login() catch also handles array/object detail as belt-and-suspenders — good.",
+    "LoginPage.jsx passes r.error (guaranteed string now) into toast.error — safe."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% (all 3 bug repros + 4 regressions passed)"},
+  "test_credentials": "admin@socpilot.ai / Admin@SOCPilot2026 ; analyst@socpilot.ai / Analyst@SOCPilot2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Login 422-detail-array bug is confirmed fixed via axios response interceptor in /app/frontend/src/lib/api.js. Note that <input type='email'> in LoginPage triggers HTML5 validation which blocks fully-empty submits at the browser layer; during testing the type was flipped to 'text' via JS to force the 422 code path — verifying the interceptor. Under normal user behavior the browser-level validation catches empty/invalid before hitting the API, which is also fine. A separate benign hydration warning exists in Layout.jsx (<span> inside <option>).",
+  "rca of the issue": "FastAPI returned 422 with `detail` as an array of Pydantic ErrorDetails objects. LoginPage passed `error.response.data.detail` directly into toast.error / rendered it as a child, causing React 'Objects are not valid as a React child'. Fix: axios response interceptor in /app/frontend/src/lib/api.js now stringifies array/object `detail` (joins x.msg with '; ') before rejection; auth.jsx login() catch also converts. Confirmed no crash across empty, invalid-format, and wrong-credential cases."
+}
