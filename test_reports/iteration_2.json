@@ -1,0 +1,23 @@
+{
+  "summary": "Backend testing of MSSP-report-driven self-learning KB feature. All 5 scenarios from the review request passed: meaningful edit ingests analyst_feedback KB row + vector-retrievable via /api/kb/search; trivial edit does not ingest; /close (no edit) increments accurate_confirmations without KB row; /action approve (no edit) increments confirmations without KB row; edit-then-close does NOT double count as confirmation.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_analyst_feedback_kb.py",
+    "/app/test_reports/pytest/analyst_feedback_kb.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 1624 lines — consider splitting KB / offense / auth routes into separate modules.",
+    "_ingest_analyst_feedback uses asyncio.create_task (fire-and-forget) with no retry; on failure the KB entry stays FAILED. Consider a background retry queue.",
+    "PATCH /mssp-report ingests on every meaningful edit, so successive edits create multiple feedback KB rows for the same offense. May want to update-in-place or dedupe by offense_id to keep tenant KB clean.",
+    "_mssp_meaningful_diff treats analyst_notes with <10 chars as non-meaningful but any recommendations/verdict/custom_fields/analysis_lines diff triggers ingestion — good coverage of user choice #4."
+  ],
+  "updated_files": ["/app/backend/tests/test_analyst_feedback_kb.py"],
+  "success_rate": {"backend": "100%", "frontend": "not tested (per request)"},
+  "test_credentials": "admin@socpilot.ai / Admin@SOCPilot2026",
+  "seed_data_creation": "Used pre-seeded ACME offenses. Test run created 1 new analyst_feedback KB row and mutated 4 ACME offenses (2 investigated+edited, 2 investigated+closed/approved).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Feature is working end-to-end. Vector RAG (chromadb + sentence-transformers) is functional in this env — kb/search returns 'feedback-' sourced matches. Note: tests use pytest-xdist by default via pytest.ini; run with -o addopts='' to disable parallel workers since scenarios share state via pytest module attrs."
+}

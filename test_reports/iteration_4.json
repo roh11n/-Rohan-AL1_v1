@@ -1,0 +1,33 @@
+{
+  "summary": "Run-as-is preview smoke test for SOCPilot AI. Backend: 17/17 pytest cases green in /app/backend/tests/test_smoke_deploy.py — health, admin + analyst login (JWT), invalid-cred negative case, dashboard/metrics, clients (ACME/NOVA/ORION seeded), offenses list (>=12), offense detail, tickets, users, audit, KB list (client_id required) + KB status, settings GET, settings PUT (Mongo write proven), VT health (enabled=true, total=1), on-demand VT lookup via /offenses/{id}/vt-lookup for 8.8.8.8 (no 5xx), and full /offenses/{id}/investigate run (returns analysis payload with mssp_report). Frontend: real UI login works for both admin@socpilot.ai / Admin@12345 and analyst@socpilot.ai / Analyst@123 via data-testid input-email/input-password/btn-login and reaches the dashboard. All 8 nav routes (/dashboard, /offenses, /clients, /tickets, /kb, /users, /settings, /audit) render without runtime errors. Dashboard body contains ACME + NOVA + ORION, threat-landscape widgets, severity distribution chart, and Recent Offenses table (12 rows). Settings → Threat Intel tab shows 'Enable VirusTotal lookups' toggle ON with masked key chip '••••43ef' (exact tail visible in DOM as expected). Offense detail page opens with all tabs (summary, mssp report, timeline, events, payload, artifacts, mitre, similar, kb, recommendations). No hard 500s observed anywhere.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global Layout header (Layout.jsx line 122)", "issues": ["React dev-mode hydration warning: `<span>` cannot be a child of `<option>` — the client-selector <select> populates <option> content via a dynamic expression that the emergent visual-editor instrumentation wraps in an inert <span data-ve-dynamic style='display:contents'>. Browsers strip this span from the option DOM, causing a hydration mismatch warning on every page. Non-user-facing and select still works, but the warning fires on every route. Fix: render the option's label as a plain string (avoid dynamic expression wrapper) or place the label in the option's value/label attributes."]},
+      {"screen": "Dashboard (Ingest Trend chart)", "issues": ["Recharts logs 'width(-1) height(-1) ... please add minWidth(0)/minHeight(undefined)' warnings on every render — chart still renders correctly, but the ResponsiveContainer parent has no explicit min-height so the first paint is at 0x0 before layout resolves."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_smoke_deploy.py",
+    "/app/test_reports/pytest/smoke_deploy.xml"
+  ],
+  "action_items": [
+    "(Optional) Silence hydration warning on client-selector <option> in frontend/src/components/Layout.jsx line 122 — cosmetic only.",
+    "(Optional) Give Recharts ResponsiveContainer an explicit min-height to eliminate width(-1)/height(-1) warnings."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1659 lines — carry over the earlier recommendation to split into offense_routes / settings_routes / kb_routes / threat_intel_routes modules.",
+    "/api/offenses/{id}/vt-lookup catches VT errors and returns descriptive HTTPExceptions (good), but the outer handler currently returns 400 for 'VirusTotal not configured' — that is a server-configuration state, not a client-input error; consider 409 or 503 for clarity.",
+    "Frontend visual-editor x-source instrumentation is injecting <span data-ve-dynamic> inside <option> elements (Layout.jsx). This is a build-time transform artifact — worth reporting upstream so option labels are emitted as bare strings."
+  ],
+  "updated_files": ["/app/backend/tests/test_smoke_deploy.py"],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "100% smoke (login, all 8 routes, VT-masked settings, offense detail)"},
+  "test_credentials": "admin@socpilot.ai / Admin@12345  ·  analyst@socpilot.ai / Analyst@123",
+  "seed_data_creation": "None — used the app's pre-seeded ACME/NOVA/ORION clients + 12 offenses. test_mongo_write_via_settings does a GET-then-idempotent-PUT on /api/settings so no data was mutated. test_offense_investigate invoked the investigate pipeline on offense[0] which does persist analysis output onto that offense (expected side-effect).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Preview deploy is healthy end-to-end. Frontend login (data-testid input-email/input-password/btn-login) definitively works — the main agent's earlier observation that 'login screenshot didn't visibly navigate' was likely a screenshot-timing issue; the actual navigation happens within ~1s of clicking btn-login and lands on / (dashboard renders under the root path, not /dashboard — /dashboard also renders the dashboard because the SPA router treats it as home). VT-lookup endpoint is /api/offenses/{id}/vt-lookup with body {artifact_type, value} and requires VT enabled in settings (currently yes, 1 key ending 43ef). KB list endpoint requires ?client_id=. The regression suite /app/backend/tests/test_smoke_deploy.py is safe to re-run any time; it must be invoked with `-n 0` because pytest.ini defaults to `-n 2` and this suite has no per-worker isolation.",
+  "rca of the issue": "No bug to fix. The only oddity is a benign React hydration warning caused by the emergent visual-editor's build-time instrumentation wrapping dynamic <option> content in <span data-ve-dynamic>; browsers reject <span> as a child of <option>, so it is stripped at parse time and React logs a hydration mismatch on every render. It does not break the client selector."
+}
