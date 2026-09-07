@@ -99,6 +99,12 @@ def _build_fieldmap(base: dict, offense: dict, vt: dict | None = None) -> dict:
         "devicename": b.get("log_source"), "logsource": b.get("log_source"), "device": b.get("log_source"),
         "useraccount": b.get("username"), "username": b.get("username"), "user": b.get("username"),
         "assetname": b.get("x_asset_name"), "filepath": b.get("x_file_path"),
+        "postnatsourceip": b.get("x_post_nat_source_ip"), "postnatsource": b.get("x_post_nat_source_ip"),
+        "postnatdestinationip": b.get("x_post_nat_destination_ip"),
+        "domainurl": b.get("x_domain_url"), "domain": b.get("x_domain_url"), "url_domain": b.get("x_domain_url"),
+        "contenttype": b.get("x_content_type"),
+        "lowlevelcategory": b.get("low_level_category"), "category": b.get("low_level_category"),
+        "eventname": b.get("event_name"), "action": b.get("x_action"),
     }
     if vt:
         fm.update({

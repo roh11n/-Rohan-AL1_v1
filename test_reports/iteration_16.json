@@ -1,0 +1,28 @@
+{
+  "summary": "Verified dynamic KB-Template field extraction & MSSP report rendering end-to-end for the real IND-UC-00316 offense (qradar_offense_id=1666240) and regression IND-UC-00508 (1651114) in Acme Financial. Backend investigate returns 200 with fully populated fields sourced from structured event data (offense.destination_ips was empty, values come from events[]). MSSP report (KB Template · 100%, Verdict Suspicious) renders on the frontend with: Source IP 10.13.110.47, Destination IP 103.235.46.102, Username noauth-protocol$@644112.zscloud.net, Protocol Reserved, Application General Browsing, Post NAT Source IP 115.242.158.246, Domain URL www.baidu.com, Content Type Other, Low Level Category 4002 (shown exactly once, no duplicate row), Log source Custom Rule Engine-331 :: cicggnep02-sh-primary. Analysis section mentions source host 10.13.110.47 and destination 103.235.46.102; IOC Enrichment shows LIVE VirusTotal for 103.235.46.102 = Beijing Baidu Netcom Science and Technology Co., Ltd., CN, 3 malicious / 1 suspicious, VT URL present; Impact & Recommendations sections filled (\"Kindly block the IP address 103.235.46.102 …\"). Regression IND-UC-00508: description-based extraction shows Source IP 192.168.181.102, Destination IP 52.163.83.68, Action/Action Taken=Assess, Asset Name LTWELPUNE8QMN, File Path C:\\Users\\admin\\AppData\\Local\\Temp\\is-SDK9V.tmp\\LocalServiceComponents.tmp, TM_srchost LTWELPUNE8QMN, KB Template 100%, Verdict FP. Events tab for 1666240 shows 8 rows, expandable via [data-testid=event-row-0] into [data-testid=event-detail-0] containing full payload text and all structured fields (sourceip/destinationip/postnatsourceip/username). No 500 errors on investigate.",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "kb-template recommendations", "issue": "Second recommendation still contains literal placeholder text 'Rule Name' quoted (e.g. 'Review the firewall rule \"Rule Name\" and restrict access.') because offense rules array is empty. Cosmetic — could fall back to Log source or drop the placeholder."}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Layout header client selector", "issues": ["Recurring React hydration warning: <span data-ve-dynamic> inside <option> (Layout.jsx). Cosmetic; carried over from iter_12–15."]}
+    ]
+  },
+  "test_report_links": ["/app/test_reports/mssp_1666240.png", "/app/test_reports/mssp_1651114.png", "/app/test_reports/events_1666240.png"],
+  "action_items": [
+    "Optional: replace unresolved '\"Rule Name\"' placeholder in the KB template recommendation when offense.rules is empty (fall back to log source or omit)."
+  ],
+  "critical_code_review_comments": [
+    "Layout.jsx still nests visual-editor <span> inside <option>; produces a hydration warning on every page load."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (2/2 investigate 200 w/ populated fields + live VT)", "frontend": "100% (all fields, sections, IOC, verdict/KB badges, events expand verified)"},
+  "test_credentials": "admin@socpilot.ai / Admin@12345",
+  "seed_data_creation": "None. Imported offenses 1666240 and 1651114 preserved.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Offense IDs (Acme Financial 4cb11f78-4281-4057-bc70-459668761926): 1666240 -> 4e84d2b4-2eff-4a84-896a-b18a86438309; 1651114 -> af5e0af8-6b37-4044-bafa-34bb5fe00299. Tabs use [data-testid=tab-events] etc. MSSP fields use [data-testid=mssp-report-<field_key>] (e.g. mssp-report-source_ip, mssp-report-x_domain_url). VT adds ~5-8s to first investigate (subsequent calls are ~1s cached).",
+  "rca of the issue": "N/A — dynamic field extraction (structured-event first, then payload k=v, then description regex) and live VT enrichment work end-to-end for real customer offenses."
+}

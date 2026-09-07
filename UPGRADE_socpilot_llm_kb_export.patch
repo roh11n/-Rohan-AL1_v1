@@ -1,9 +1,9 @@
 diff --git a/backend/kb_template.py b/backend/kb_template.py
 new file mode 100644
-index 0000000..6edc932
+index 0000000..c91d174
 --- /dev/null
 +++ b/backend/kb_template.py
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,185 @@
 +"""Deterministic KB-template analysis engine.
 +
 +KB mode: when a new offense's alert/rule name matches a manually-added
@@ -105,6 +105,12 @@ index 0000000..6edc932
 +        "devicename": b.get("log_source"), "logsource": b.get("log_source"), "device": b.get("log_source"),
 +        "useraccount": b.get("username"), "username": b.get("username"), "user": b.get("username"),
 +        "assetname": b.get("x_asset_name"), "filepath": b.get("x_file_path"),
++        "postnatsourceip": b.get("x_post_nat_source_ip"), "postnatsource": b.get("x_post_nat_source_ip"),
++        "postnatdestinationip": b.get("x_post_nat_destination_ip"),
++        "domainurl": b.get("x_domain_url"), "domain": b.get("x_domain_url"), "url_domain": b.get("x_domain_url"),
++        "contenttype": b.get("x_content_type"),
++        "lowlevelcategory": b.get("low_level_category"), "category": b.get("low_level_category"),
++        "eventname": b.get("event_name"), "action": b.get("x_action"),
 +    }
 +    if vt:
 +        fm.update({
@@ -767,7 +773,7 @@ index 839ed59..eb4d5cd 100644
      await _audit(user["email"], "delete", "kb", entry_id)
      return {"deleted": True}
 diff --git a/backend/soc_engine.py b/backend/soc_engine.py
-index d8c67ba..ef0d3aa 100644
+index d8c67ba..224a95f 100644
 --- a/backend/soc_engine.py
 +++ b/backend/soc_engine.py
 @@ -344,7 +344,7 @@ def _build_timeline(off: dict, events: list[dict]) -> list[dict]:
@@ -803,7 +809,7 @@ index d8c67ba..ef0d3aa 100644
  
      # Date formatting: "21 Jul 2026, 09:29:58"
      from datetime import datetime as _dt
-@@ -666,7 +668,20 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+@@ -666,7 +668,24 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
      if log_source_str: optional_fields.append(("log_source", "Log source"))
  
      # Discover NEW fields dynamically from event payloads (LLM-style extraction via regex).
@@ -817,6 +823,10 @@ index d8c67ba..ef0d3aa 100644
 +    if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
 +    if payload_kv.get("application"): pkv_fields.append(("Application", payload_kv["application"]))
 +    if payload_kv.get("bytes"): pkv_fields.append(("Bytes", payload_kv["bytes"]))
++    if payload_kv.get("post_nat_source_ip"): pkv_fields.append(("Post NAT Source IP", payload_kv["post_nat_source_ip"]))
++    if payload_kv.get("post_nat_destination_ip"): pkv_fields.append(("Post NAT Destination IP", payload_kv["post_nat_destination_ip"]))
++    if payload_kv.get("domain_url"): pkv_fields.append(("Domain URL", payload_kv["domain_url"]))
++    if payload_kv.get("content_type"): pkv_fields.append(("Content Type", payload_kv["content_type"]))
 +    for lbl, val in custom_fields:
 +        pkv_fields.append((lbl, val))
 +    discovered = pkv_fields + _discover_extra_fields(events)
@@ -825,7 +835,7 @@ index d8c67ba..ef0d3aa 100644
      for label, value in discovered:
          key = f"x_{label.lower().replace(' ', '_')}"
          optional_fields.append((key, label))
-@@ -734,6 +749,87 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+@@ -734,6 +753,103 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
      return report_dict
  
  
@@ -883,26 +893,42 @@ index d8c67ba..ef0d3aa 100644
 +        seen.add(lbl.lower())
 +        custom.append((lbl, val[:300]))
 +
-+    proto = pick("proto", "protocol", "protocolname")
-+    if proto and proto.isdigit():
-+        proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(proto, proto)
++    def ev_get(*keys):
++        for k in keys:
++            for e in events or []:
++                v = e.get(k)
++                if v not in (None, "", "0.0.0.0", "0"):
++                    return v
++        return None
++
++    proto = ev_get("protocol") or pick("proto", "protocol", "protocolname")
++    if proto and str(proto).isdigit():
++        proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(str(proto), str(proto))
 +    action = pick("action", "rule_action", "act")
 +    if not action:
 +        for lbl, val in custom:
 +            if "action" in lbl.lower():
 +                action = val
 +                break
++    # Structured event fields take priority, then payload key=value, then description text.
 +    out = {
-+        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
-+        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost") or find_ip("destination"),
-+        "source_port": pick("srcport", "source_port", "sport", "spt"),
-+        "destination_port": pick("dstport", "destination_port", "dport", "dpt"),
++        "source_ip": ev_get("sourceip", "source_ip") or pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
++        "destination_ip": ev_get("destinationip", "destination_ip") or pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost") or find_ip("destination"),
++        "source_port": ev_get("sourceport") or pick("srcport", "source_port", "sport", "spt"),
++        "destination_port": ev_get("destinationport") or pick("dstport", "destination_port", "dport", "dpt"),
 +        "protocol": proto,
 +        "action": action,
 +        "rule_name": pick("rule_name", "rulename"),
-+        "username": pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
-+        "application": pick("app", "application", "appname", "requestclientapplication"),
++        "username": ev_get("username") or pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
++        "application": ev_get("application", "app") or pick("app", "application", "appname", "requestclientapplication"),
 +        "bytes": pick("bytes", "byte", "in", "out", "bytesin", "bytesout"),
++        "post_nat_source_ip": ev_get("postnatsourceip"),
++        "post_nat_destination_ip": ev_get("postnatdestinationip"),
++        "domain_url": ev_get("domain_url", "domainurl", "url") or pick("domain_url", "url", "domain", "dhost"),
++        "content_type": ev_get("content_type", "contenttype") or pick("content_type", "contenttype"),
++        "event_name": ev_get("event_name"),
++        "low_level_category": ev_get("category_name") or pick("low_level_category"),
++        "log_source": ev_get("log_source", "logsource"),
 +    }
 +    res = {k: v for k, v in out.items() if v}
 +    if custom:

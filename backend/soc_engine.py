@@ -677,6 +677,10 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
     if payload_kv.get("application"): pkv_fields.append(("Application", payload_kv["application"]))
     if payload_kv.get("bytes"): pkv_fields.append(("Bytes", payload_kv["bytes"]))
+    if payload_kv.get("post_nat_source_ip"): pkv_fields.append(("Post NAT Source IP", payload_kv["post_nat_source_ip"]))
+    if payload_kv.get("post_nat_destination_ip"): pkv_fields.append(("Post NAT Destination IP", payload_kv["post_nat_destination_ip"]))
+    if payload_kv.get("domain_url"): pkv_fields.append(("Domain URL", payload_kv["domain_url"]))
+    if payload_kv.get("content_type"): pkv_fields.append(("Content Type", payload_kv["content_type"]))
     for lbl, val in custom_fields:
         pkv_fields.append((lbl, val))
     discovered = pkv_fields + _discover_extra_fields(events)
@@ -803,26 +807,42 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
         seen.add(lbl.lower())
         custom.append((lbl, val[:300]))
 
-    proto = pick("proto", "protocol", "protocolname")
-    if proto and proto.isdigit():
-        proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(proto, proto)
+    def ev_get(*keys):
+        for k in keys:
+            for e in events or []:
+                v = e.get(k)
+                if v not in (None, "", "0.0.0.0", "0"):
+                    return v
+        return None
+
+    proto = ev_get("protocol") or pick("proto", "protocol", "protocolname")
+    if proto and str(proto).isdigit():
+        proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(str(proto), str(proto))
     action = pick("action", "rule_action", "act")
     if not action:
         for lbl, val in custom:
             if "action" in lbl.lower():
                 action = val
                 break
+    # Structured event fields take priority, then payload key=value, then description text.
     out = {
-        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
-        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost") or find_ip("destination"),
-        "source_port": pick("srcport", "source_port", "sport", "spt"),
-        "destination_port": pick("dstport", "destination_port", "dport", "dpt"),
+        "source_ip": ev_get("sourceip", "source_ip") or pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
+        "destination_ip": ev_get("destinationip", "destination_ip") or pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost") or find_ip("destination"),
+        "source_port": ev_get("sourceport") or pick("srcport", "source_port", "sport", "spt"),
+        "destination_port": ev_get("destinationport") or pick("dstport", "destination_port", "dport", "dpt"),
         "protocol": proto,
         "action": action,
         "rule_name": pick("rule_name", "rulename"),
-        "username": pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
-        "application": pick("app", "application", "appname", "requestclientapplication"),
+        "username": ev_get("username") or pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
+        "application": ev_get("application", "app") or pick("app", "application", "appname", "requestclientapplication"),
         "bytes": pick("bytes", "byte", "in", "out", "bytesin", "bytesout"),
+        "post_nat_source_ip": ev_get("postnatsourceip"),
+        "post_nat_destination_ip": ev_get("postnatdestinationip"),
+        "domain_url": ev_get("domain_url", "domainurl", "url") or pick("domain_url", "url", "domain", "dhost"),
+        "content_type": ev_get("content_type", "contenttype") or pick("content_type", "contenttype"),
+        "event_name": ev_get("event_name"),
+        "low_level_category": ev_get("category_name") or pick("low_level_category"),
+        "log_source": ev_get("log_source", "logsource"),
     }
     res = {k: v for k, v in out.items() if v}
     if custom:
