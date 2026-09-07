@@ -1,0 +1,24 @@
+{
+  "summary": "Verified fix for offense 1651114 (IND-UC-00508 Virus/Behavior Monitoring) where key fields were embedded in description text, not structured fields. Frontend MSSP Report tab renders all 12 expected data points, KB CSV with ITSM_* columns imported successfully, and regression on 999001 (Check Point) and 1667868 still passes.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Layout header client selector", "issues": ["Recurring React hydration warning: <span data-ve-dynamic> injected as child of <option> at Layout.jsx:122. Cosmetic, non-blocking (already reported in iter_12/13)."]}
+    ]
+  },
+  "test_report_links": ["/app/test_reports/mssp_1651114.png"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Layout.jsx line 122 still wraps <option> children in <span data-ve-dynamic>, causing React hydration warning on every page load. Render plain text in <option>."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (verified via UI-triggered investigation calling backend)", "frontend": "100% (12/12 checks + 2/2 regression)"},
+  "test_credentials": "admin@socpilot.ai / Admin@12345",
+  "seed_data_creation": "None. Preserved offense 1651114 and IND-UC-00508 KB entry as instructed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Offense 1651114 (id=af5e0af8-6b37-4044-bafa-34bb5fe00299, client=Acme Financial 4cb11f78-4281-4057-bc70-459668761926) MSSP Report tab (via btn-investigate then role=tab 'mssp report') shows: KB TEMPLATE · 100% badge, VERDICT · FP badge, Source IP 192.168.181.102, Destination IP 52.163.83.68, Action=Assess, Action Taken=Assess, Asset Name=LTWELPUNE8QMN, File Path=C:\\Users\\admin\\AppData\\Local\\Temp\\is-SDK9V.tmp\\LocalServiceComponents.tmp, TM_srchost=LTWELPUNE8QMN. Analysis lines include 'Trend Micro Behavior Monitoring flagged a new startup program on 192.168.181.102', 'Impact: Low - single endpoint', and 'Observed artifacts... Source IP: 192.168.181.102; Destination IP: 52.163.83.68'. Recommendations include 'Rescan the endpoint 192.168.181.102'. Regression: offenses #999001 and #1667868 both investigate without error and produce verdict badges. KB list page shows IND-UC-00508 with MANUAL and FP tags confirming ITSM_* column CSV import works.",
+  "rca of the issue": "N/A - all fixes verified working end-to-end via Playwright against public REACT_APP_BACKEND_URL."
+}

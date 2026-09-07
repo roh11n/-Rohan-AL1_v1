@@ -523,6 +523,9 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
             return None  # nothing usable from the model
 
         def _first(key):
+            v = rule_engine_mssp.get(key.rstrip("s")) if rule_engine_mssp else None
+            if v:
+                return v
             arr = offense.get(key) or []
             return arr[0] if arr else None
         obs = []

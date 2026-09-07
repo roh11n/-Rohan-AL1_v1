@@ -159,6 +159,8 @@ class KBEntry(BaseModel):
     entry_kind: str = "file"  # file | manual | analyst_feedback
     alert_name: Optional[str] = None
     analysis: Optional[str] = None
+    impact: Optional[str] = None
+    ioc_enrichment: bool = False  # if true, IOC Enrichment section is generated live from VirusTotal
     verdict: Optional[str] = None  # TP | FP | Suspicious
     recommendations: List[str] = Field(default_factory=list)
     rag_source: Optional[str] = None

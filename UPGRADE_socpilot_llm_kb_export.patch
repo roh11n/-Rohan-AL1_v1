@@ -1,9 +1,9 @@
 diff --git a/backend/kb_template.py b/backend/kb_template.py
 new file mode 100644
-index 0000000..80e5cb2
+index 0000000..6edc932
 --- /dev/null
 +++ b/backend/kb_template.py
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,179 @@
 +"""Deterministic KB-template analysis engine.
 +
 +KB mode: when a new offense's alert/rule name matches a manually-added
@@ -70,41 +70,105 @@ index 0000000..80e5cb2
 +    return None, 0
 +
 +
-+def _fmt_dt(offense: dict):
-+    ts = offense.get("start_time")
-+    if not ts:
-+        return None
-+    try:
-+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).strftime("%d %b %Y, %H:%M:%S")
-+    except Exception:
-+        return str(ts)
++def _fill(text: str, fm: dict) -> str:
++    """Substitute [Placeholder], {placeholder} and "Placeholder" tokens with field
++    values. Placeholder names are matched case/space/punctuation-insensitively."""
++    if not text:
++        return text
++
++    def rep(m):
++        inner = m.group(1)
++        key = re.sub(r"[^a-z0-9]", "", inner.lower())
++        return str(fm[key]) if fm.get(key) else m.group(0)
++
++    text = re.sub(r"\[([^\[\]\n]{1,40})\]", rep, text)
++    text = re.sub(r"\{([^{}\n]{1,40})\}", rep, text)
++    text = re.sub(r'"([^"\n]{1,40})"', rep, text)
++    return text
 +
 +
-+def _artifacts(offense: dict) -> dict:
-+    def first(key):
-+        v = offense.get(key) or []
-+        return v[0] if v else None
-+    return {
-+        "source_ip": first("source_ips"),
-+        "destination_ip": first("destination_ips"),
-+        "username": first("usernames"),
-+        "offense_id": offense.get("qradar_offense_id") or offense.get("id"),
-+        "date_time": _fmt_dt(offense),
++def _build_fieldmap(base: dict, offense: dict, vt: dict | None = None) -> dict:
++    b = base or {}
++    fm = {
++        "sourceip": b.get("source_ip"), "srcip": b.get("source_ip"),
++        "sourcehost": b.get("source_ip"), "sourcehostnameip": b.get("source_ip"),
++        "destinationip": b.get("destination_ip"), "destip": b.get("destination_ip"),
++        "destinationhost": b.get("destination_ip"), "destinationhostnameip": b.get("destination_ip"),
++        "protocol": b.get("x_protocol"),
++        "destinationport": b.get("x_destination_port"), "destport": b.get("x_destination_port"),
++        "sourceport": b.get("x_source_port"), "srcport": b.get("x_source_port"),
++        "port": b.get("x_destination_port") or b.get("x_source_port"),
++        "rulename": b.get("x_rule_name"),
++        "application": b.get("x_application"), "app": b.get("x_application"),
++        "bytes": b.get("x_bytes"),
++        "starttime": b.get("date_time"), "time": b.get("date_time"), "datetime": b.get("date_time"),
++        "devicename": b.get("log_source"), "logsource": b.get("log_source"), "device": b.get("log_source"),
++        "useraccount": b.get("username"), "username": b.get("username"), "user": b.get("username"),
++        "assetname": b.get("x_asset_name"), "filepath": b.get("x_file_path"),
 +    }
++    if vt:
++        fm.update({
++            "ispasn": vt.get("as_owner"), "isp": vt.get("as_owner"), "asn": vt.get("as_owner"),
++            "country": vt.get("country"),
++            "vtabusescore": vt.get("score"), "vtscore": vt.get("score"), "vt": vt.get("score"),
++            "reputationscore": vt.get("score"), "url": vt.get("url"), "virustotal": vt.get("url"),
++        })
++    return {k: v for k, v in fm.items() if v}
 +
 +
-+def _substitute(text: str, art: dict) -> str:
-+    out = text or ""
-+    mapping = {
-+        "{source_ip}": art.get("source_ip") or "N/A",
-+        "{destination_ip}": art.get("destination_ip") or "N/A",
-+        "{username}": art.get("username") or "N/A",
-+        "{offense_id}": str(art.get("offense_id") or "N/A"),
-+        "{date_time}": art.get("date_time") or "N/A",
-+    }
-+    for k, v in mapping.items():
-+        out = out.replace(k, str(v))
-+    return out
++def build_kb_template_report(offense: dict, events: list[dict], kb_entry: dict,
++                             base_report: dict, score: int, vt: dict | None = None) -> dict:
++    """Populate the KB entry's sections (Analysis / IOC Enrichment / Impact /
++    Recommendations) with this offense's fields (from offense + payload) and,
++    when enabled, live VirusTotal enrichment. Fully dynamic — no per-use-case code."""
++    base = dict(base_report or {})
++    fm = _build_fieldmap(base_report, offense, vt)
++
++    lines = []
++    n = [1]
++
++    def add(text):
++        lines.append({"n": n[0], "text": text})
++        n[0] += 1
++
++    def section(title, body):
++        if not body:
++            return
++        add(f"[{title}]")
++        for seg in re.split(r"(?:\r?\n)+", _fill(body, fm)):
++            seg = seg.strip()
++            if seg:
++                add(seg)
++
++    add(f"Matched knowledge-base template '{kb_entry.get('alert_name')}' ({score}% name match). "
++        f"Sections are populated from this offense's fields.")
++    section("Analysis", kb_entry.get("analysis"))
++    if vt and vt.get("text"):
++        section("IOC Enrichment", vt["text"])
++    elif kb_entry.get("ioc_enrichment"):
++        add("[IOC Enrichment]")
++        add("VirusTotal enrichment unavailable (no public IP matched or VT key not configured).")
++    section("Impact", kb_entry.get("impact"))
++
++    recs = [_fill(r, fm) for r in (kb_entry.get("recommendations") or [])]
++    if recs:
++        add("[Recommendations]")
++        for r in recs:
++            add(r)
++
++    base["analysis_lines"] = lines
++    if kb_entry.get("verdict"):
++        base["verdict"] = kb_entry["verdict"]
++    base["verdict_reason"] = base.get("verdict_reason") or f"Consistent with knowledge-base entry '{kb_entry.get('alert_name')}'."
++    if recs:
++        base["recommendations"] = recs
++        base["recommendation_text"] = recs[0]
++    if vt:
++        base["ioc_enrichment"] = vt
++    base["generated_by"] = f"kb-template:{kb_entry.get('alert_name')}"
++    base["kb_template_alert"] = kb_entry.get("alert_name")
++    base["kb_template_score"] = score
++    return base
 +
 +
 +def template_text(kb_entry: dict) -> str:
@@ -112,65 +176,15 @@ index 0000000..80e5cb2
 +    parts = [f"Alert: {kb_entry.get('alert_name', '')}"]
 +    if kb_entry.get("analysis"):
 +        parts.append(f"Analysis: {kb_entry['analysis']}")
++    if kb_entry.get("impact"):
++        parts.append(f"Impact: {kb_entry['impact']}")
 +    if kb_entry.get("verdict"):
 +        parts.append(f"Verdict: {kb_entry['verdict']}")
 +    if kb_entry.get("recommendations"):
 +        parts.append("Recommendations: " + "; ".join(kb_entry["recommendations"]))
 +    return "\n".join(parts)
-+
-+
-+def build_kb_template_report(offense: dict, events: list[dict], kb_entry: dict,
-+                             base_report: dict, score: int) -> dict:
-+    """Adapt a KB entry's documented analysis to the current offense's artifacts.
-+    Starts from the rule-engine report (base_report) to keep extracted fields,
-+    then overrides analysis_lines / verdict / recommendations from the template."""
-+    art = _artifacts(offense)
-+    base = dict(base_report or {})
-+
-+    lines = []
-+    n = 1
-+    lines.append({"n": n, "text": (
-+        f"This alert matches the knowledge-base template '{kb_entry.get('alert_name')}' "
-+        f"(name match {score}%). Reusing the documented analysis and adapting it to this "
-+        f"offense's artifacts.")})
-+    n += 1
-+
-+    analysis_txt = _substitute(kb_entry.get("analysis") or "", art)
-+    for seg in re.split(r"(?:\r?\n)+|(?<=[.;])\s+(?=[A-Z0-9])", analysis_txt):
-+        seg = seg.strip()
-+        if seg:
-+            lines.append({"n": n, "text": seg})
-+            n += 1
-+
-+    obs = []
-+    if art.get("source_ip"):
-+        obs.append(f"Source IP: {art['source_ip']}")
-+    if art.get("destination_ip"):
-+        obs.append(f"Destination IP: {art['destination_ip']}")
-+    if art.get("username"):
-+        obs.append(f"Username: {art['username']}")
-+    if art.get("date_time"):
-+        obs.append(f"Time: {art['date_time']}")
-+    obs.append(f"Offense ID: {art.get('offense_id')}")
-+    lines.append({"n": n, "text": "Observed artifacts in this offense — " + "; ".join(obs) + "."})
-+
-+    base["analysis_lines"] = lines
-+    if kb_entry.get("verdict"):
-+        base["verdict"] = kb_entry["verdict"]
-+    base["verdict_reason"] = _substitute(
-+        base.get("verdict_reason") or f"Consistent with knowledge-base entry '{kb_entry.get('alert_name')}'.",
-+        art,
-+    )
-+    if kb_entry.get("recommendations"):
-+        base["recommendations"] = [_substitute(r, art) for r in kb_entry["recommendations"]]
-+    if base.get("recommendations"):
-+        base["recommendation_text"] = base["recommendations"][0]
-+    base["generated_by"] = f"kb-template:{kb_entry.get('alert_name')}"
-+    base["kb_template_alert"] = kb_entry.get("alert_name")
-+    base["kb_template_score"] = score
-+    return base
 diff --git a/backend/llm_engine.py b/backend/llm_engine.py
-index eb5ddea..12cfcc2 100644
+index eb5ddea..838e584 100644
 --- a/backend/llm_engine.py
 +++ b/backend/llm_engine.py
 @@ -385,7 +385,7 @@ def _step3_verify(model_name: str, offense: dict, events: list[dict],
@@ -182,7 +196,7 @@ index eb5ddea..12cfcc2 100644
                            temperature: float = 0.3,
                            step_timeout_seconds: int = 180) -> dict | None:
      """Run the 3-step LLM chain. Returns a full MSSP report dict on success, else None.
-@@ -464,3 +464,87 @@ def build_llm_mssp_report(offense: dict, events: list[dict],
+@@ -464,3 +464,90 @@ def build_llm_mssp_report(offense: dict, events: list[dict],
  
  def load_error() -> str | None:
      return _STATE.get("load_error")
@@ -245,6 +259,9 @@ index eb5ddea..12cfcc2 100644
 +            return None  # nothing usable from the model
 +
 +        def _first(key):
++            v = rule_engine_mssp.get(key.rstrip("s")) if rule_engine_mssp else None
++            if v:
++                return v
 +            arr = offense.get(key) or []
 +            return arr[0] if arr else None
 +        obs = []
@@ -271,10 +288,10 @@ index eb5ddea..12cfcc2 100644
 +        logger.warning("LLM one-shot pipeline failure: %s — falling back.", e)
 +        return None
 diff --git a/backend/models.py b/backend/models.py
-index 04cc9c5..e99410b 100644
+index 04cc9c5..571098d 100644
 --- a/backend/models.py
 +++ b/backend/models.py
-@@ -155,6 +155,13 @@ class KBEntry(BaseModel):
+@@ -155,6 +155,15 @@ class KBEntry(BaseModel):
      uploaded_by: str = ""
      uploaded_at: str = Field(default_factory=_now)
      completed_at: Optional[str] = None
@@ -282,13 +299,15 @@ index 04cc9c5..e99410b 100644
 +    entry_kind: str = "file"  # file | manual | analyst_feedback
 +    alert_name: Optional[str] = None
 +    analysis: Optional[str] = None
++    impact: Optional[str] = None
++    ioc_enrichment: bool = False  # if true, IOC Enrichment section is generated live from VirusTotal
 +    verdict: Optional[str] = None  # TP | FP | Suspicious
 +    recommendations: List[str] = Field(default_factory=list)
 +    rag_source: Optional[str] = None
  
  
  # ----- Settings -----
-@@ -169,13 +176,14 @@ class QRadarSettings(BaseModel):
+@@ -169,13 +178,14 @@ class QRadarSettings(BaseModel):
  
  class LLMSettings(BaseModel):
      provider: str = "local"  # local | huggingface | ollama
@@ -316,7 +335,7 @@ index 5580d48..9549171 100644
  openpyxl>=3.1.0
 +accelerate>=1.0.0
 diff --git a/backend/server.py b/backend/server.py
-index 839ed59..dfcd515 100644
+index 839ed59..eb4d5cd 100644
 --- a/backend/server.py
 +++ b/backend/server.py
 @@ -2,6 +2,7 @@
@@ -446,13 +465,43 @@ index 839ed59..dfcd515 100644
  
      # Load learned rule adjustments (Analyst Coach)
      adj_docs = await db.learned_adjustments.find({}, {"_id": 0}).to_list(500)
-@@ -647,40 +715,43 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
+@@ -647,40 +715,75 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
                                            llm_narrative=narrative, ti_settings=ti_cfg,
                                            learned_adjustments=learned_adjustments)
  
 -    # --- LLM-driven MSSP report (best-effort; falls back to rule engine on any failure) ---
 -    if llm_cfg.get("enable_llm"):
--        try:
++    # --- KB-template / LLM MSSP report ---
++    # Match the offense's alert name against manually-added KB "historical data"
++    # (client-scoped + global "ALL tenants" entries).
++    manual_entries = await db.kb_entries.find(
++        {"entry_kind": "manual", "client_id": {"$in": [doc["client_id"], "ALL"]}},
++        {"_id": 0},
++    ).sort("uploaded_at", -1).to_list(500)
++    matched_kb, match_score = kb_template.find_best_template(doc, manual_entries)
++    rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
++
++    # Base report is always the rule-engine report (carries extracted fields);
++    # the KB-template builder consumes it and populates the sections.
++    base_mssp = dict(rule_engine_mssp)
++    base_mssp.setdefault("generated_by", "rule-engine")
++    base_source = "rule-engine"
++    # KB mode — deterministic template adaptation (instant, always available).
++    def _is_public(ip):
++        return bool(ip) and not re.match(r"^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fe80:|fc|fd)", str(ip))
++
++    async def _vt_enrich(base_mssp):
++        """Live VirusTotal IOC enrichment for the offense's external IP."""
++        if not matched_kb or not matched_kb.get("ioc_enrichment"):
++            return None
++        if not (ti_cfg.get("virustotal_enabled") and (ti_cfg.get("virustotal_api_keys") or ti_cfg.get("virustotal_api_key"))):
++            return None
++        from threat_intel import parse_vt_keys, vt_ip
++        keys = parse_vt_keys(ti_cfg.get("virustotal_api_keys", ""), ti_cfg.get("virustotal_api_key", ""))
++        ext = next((ip for ip in (base_mssp.get("destination_ip"), base_mssp.get("source_ip")) if _is_public(ip)), None)
++        if not ext or not keys:
++            return None
+         try:
 -            import llm_engine  # local import — heavy transformers stack, lazy load
 -            rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
 -            model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-3B-Instruct"
@@ -484,29 +533,30 @@ index 839ed59..dfcd515 100644
 -            analysis["mssp_report"] = analysis.get("mssp_report") or {}
 -            analysis["mssp_report"]["generated_by"] = f"rule-engine (LLM fallback: {e})"
 -            analysis["mssp_report_source"] = "rule-engine-fallback"
-+    # --- KB-template / LLM MSSP report ---
-+    # Match the offense's alert name against manually-added KB "historical data"
-+    # (client-scoped + global "ALL tenants" entries).
-+    manual_entries = await db.kb_entries.find(
-+        {"entry_kind": "manual", "client_id": {"$in": [doc["client_id"], "ALL"]}},
-+        {"_id": 0},
-+    ).to_list(500)
-+    matched_kb, match_score = kb_template.find_best_template(doc, manual_entries)
-+    rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
++            r = await asyncio.get_event_loop().run_in_executor(None, vt_ip, ext, keys)
++        except Exception:
++            r = None
++        if not r:
++            return None
++        url = f"https://www.virustotal.com/gui/ip-address/{ext}"
++        score = f"{r.get('malicious', 0)} malicious / {r.get('suspicious', 0)} suspicious"
++        return {
++            "ip": ext, "as_owner": r.get("as_owner"), "country": r.get("country"),
++            "score": score, "url": url,
++            "text": (f"We reviewed IP {ext} against VirusTotal. It belongs to "
++                     f"{r.get('as_owner') or 'an unknown provider'} and is geolocated in "
++                     f"{r.get('country') or 'an unknown country'}. Reputation: {score}. "
++                     f"IOC Reference (VirusTotal): {url}"),
++        }
 +
-+    # Base report: KB-template if a manual entry matches the alert name, else rule engine.
 +    if matched_kb:
-+        base_mssp = kb_template.build_kb_template_report(
-+            doc, doc.get("events") or [], matched_kb, rule_engine_mssp, match_score)
-+        base_source = "kb-template"
++        vt_enrich = await _vt_enrich(base_mssp)
++        analysis["mssp_report"] = kb_template.build_kb_template_report(
++            doc, doc.get("events") or [], matched_kb, base_mssp, match_score, vt=vt_enrich)
++        analysis["mssp_report_source"] = "kb-template"
 +    else:
-+        base_mssp = dict(rule_engine_mssp)
-+        base_mssp.setdefault("generated_by", "rule-engine")
-+        base_source = "rule-engine"
-+    analysis["mssp_report"] = base_mssp
-+    analysis["mssp_report_source"] = base_source
-+
-+    # In LLM mode, Qwen refines the report in the BACKGROUND (CPU generation
++        analysis["mssp_report"] = base_mssp
++        analysis["mssp_report_source"] = base_source
 +    # exceeds the ingress request window). The response returns immediately with
 +    # the KB/rule report stamped llm_status="pending"; the UI polls for the update.
 +    schedule_llm = analysis_mode == "llm"
@@ -524,7 +574,7 @@ index 839ed59..dfcd515 100644
  
      updates = {
          "ai_analysis": analysis,
-@@ -696,10 +767,56 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
+@@ -696,10 +799,56 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
      }
      await db.offenses.update_one({"id": offense_id}, {"$set": updates})
      await _audit(user["email"], "investigate", "offense", offense_id, {"risk": analysis["risk_score"]})
@@ -581,7 +631,7 @@ index 839ed59..dfcd515 100644
  class OffenseCloseRequest(BaseModel):
      closure_comments: str
      closure_source: str = "analyst"  # analyst | xsoar | duplicate
-@@ -1290,6 +1407,115 @@ async def list_kb(client_id: str, user: dict = Depends(get_current_user)):
+@@ -1290,6 +1439,125 @@ async def list_kb(client_id: str, user: dict = Depends(get_current_user)):
      return await db.kb_entries.find({"client_id": client_id}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
  
  
@@ -589,6 +639,8 @@ index 839ed59..dfcd515 100644
 +    client_id: str  # a client id OR "ALL" for a global entry applicable to every tenant
 +    alert_name: str
 +    analysis: str
++    impact: Optional[str] = None
++    ioc_enrichment: bool = False  # generate IOC Enrichment section live from VirusTotal
 +    verdict: Optional[str] = None  # TP | FP | Suspicious
 +    recommendations: List[str] = []
 +    kb_type: str = "historical_incident"
@@ -597,8 +649,8 @@ index 839ed59..dfcd515 100644
 +@api.post("/kb/manual")
 +async def add_kb_manual(payload: KBManualRequest,
 +                        user: dict = Depends(require_roles([UserRole.ADMIN, UserRole.SOC_MANAGER, UserRole.L2, UserRole.L3]))):
-+    """Add historical analysis data by hand (Name + Analysis [+ Verdict, Recommendations]).
-+    Stored structured (for the KB-template matcher) AND vector-indexed (for RAG retrieval).
++    """Add historical analysis data by hand. Sections: Analysis, Impact,
++    Recommendations, and optional IOC Enrichment (generated live from VirusTotal).
 +    Use client_id="ALL" to make the entry apply to every tenant."""
 +    _assert_tenant_access(user, payload.client_id)
 +    if not payload.alert_name.strip() or not payload.analysis.strip():
@@ -618,6 +670,8 @@ index 839ed59..dfcd515 100644
 +        entry_kind="manual",
 +        alert_name=payload.alert_name.strip(),
 +        analysis=payload.analysis.strip(),
++        impact=(payload.impact or "").strip() or None,
++        ioc_enrichment=bool(payload.ioc_enrichment),
 +        verdict=verdict,
 +        recommendations=recs,
 +        rag_source=source,
@@ -666,21 +720,27 @@ index 839ed59..dfcd515 100644
 +    loop = asyncio.get_event_loop()
 +    for raw in reader:
 +        row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items() if k}
-+        alert = g(row, "alert_name", "alert", "rule_name", "rule", "name", "title", "use_case", "usecase", "offense_name", "offense")
-+        analysis = g(row, "analysis", "description", "summary", "details", "resolution", "comment", "comments", "notes")
++        alert = g(row, "alert_name", "alert", "rule_name", "rule", "name", "title", "use_case", "usecase", "offense_name", "offense", "signature")
++        analysis = g(row, "analysis", "itsm_analysis", "analyst_analysis", "l1_analysis", "soc_analysis", "description", "summary", "details", "resolution", "close_notes", "closenotes", "comment", "comments", "notes")
++        impact = g(row, "itsm_impact", "impact", "business_impact")
 +        if not alert or not analysis:
 +            skipped += 1
 +            continue
-+        vraw = g(row, "verdict", "disposition", "classification", "conclusion").upper()
-+        verdict = ("TP" if ("TRUE" in vraw or vraw == "TP") else
-+                   "FP" if ("FALSE" in vraw or vraw == "FP") else
++        vraw = g(row, "verdict", "disposition", "classification", "conclusion", "closereason", "close_reason").upper()
++        verdict = ("FP" if ("FALSE" in vraw or "FP" in vraw or "BENIGN" in vraw or "NOT AN ISSUE" in vraw) else
++                   "TP" if ("TRUE" in vraw or vraw.strip() == "TP" or "CONFIRMED" in vraw or "MALICIOUS" in vraw) else
 +                   "Suspicious" if "SUSP" in vraw else None)
-+        recs_raw = g(row, "recommendations", "recommendation", "action", "actions", "remediation")
++        recs_raw = g(row, "recommendations", "itsm_recommendations", "recommendation", "action", "actions", "remediation")
++        ioc_raw = g(row, "ioc_enrichment", "ioc", "enrichment").lower()
++        ioc = (ioc_raw in ("1", "true", "yes", "y") or
++               "ioc enrichment" in (analysis or "").lower() or
++               "virustotal" in (analysis or "").lower() or "abuseipdb" in (analysis or "").lower())
 +        recs = [x.strip() for x in re.split(r"[\n;|]+", recs_raw) if x.strip()]
 +        source = f"csv-{uuid.uuid4().hex[:12]}"
 +        entry = KBEntry(client_id=client_id, kb_type="historical_incident", filename=alert,
 +                        content_summary=analysis[:280], document_count=0, status="READY",
-+                        entry_kind="manual", alert_name=alert, analysis=analysis, verdict=verdict,
++                        entry_kind="manual", alert_name=alert, analysis=analysis,
++                        impact=impact or None, ioc_enrichment=ioc, verdict=verdict,
 +                        recommendations=recs, rag_source=source, uploaded_by=user["email"],
 +                        completed_at=_now())
 +        await db.kb_entries.insert_one(entry.model_dump())
@@ -697,7 +757,7 @@ index 839ed59..dfcd515 100644
  @api.post("/kb/upload")
  async def upload_kb(client_id: str = Form(...), kb_type: str = Form(...),
                      file: UploadFile = File(...),
-@@ -1358,7 +1584,7 @@ async def delete_kb(entry_id: str,
+@@ -1358,7 +1626,7 @@ async def delete_kb(entry_id: str,
      if not doc:
          raise HTTPException(404, "Not found")
      _assert_tenant_access(user, doc.get("client_id"))
@@ -707,7 +767,7 @@ index 839ed59..dfcd515 100644
      await _audit(user["email"], "delete", "kb", entry_id)
      return {"deleted": True}
 diff --git a/backend/soc_engine.py b/backend/soc_engine.py
-index d8c67ba..02ae702 100644
+index d8c67ba..ef0d3aa 100644
 --- a/backend/soc_engine.py
 +++ b/backend/soc_engine.py
 @@ -344,7 +344,7 @@ def _build_timeline(off: dict, events: list[dict]) -> list[dict]:
@@ -728,21 +788,22 @@ index d8c67ba..02ae702 100644
      if any(x in net for x in ("prod", "db", "file", "domain")):
          return "HIGH"
      if "dmz" in net:
-@@ -630,9 +630,10 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+@@ -630,9 +630,11 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
      if log_source_name:
          log_source_str = f"{log_source_name} @ {log_source_ip}" if log_source_ip else log_source_name
  
 -    src_ip = _first(offense.get("source_ips"))
 -    dst_ip = _first(offense.get("destination_ips"))
 -    username = _first(offense.get("usernames"))
-+    payload_kv = _parse_payload_kv(events)
++    payload_kv = _parse_payload_kv(events, offense=offense)
++    custom_fields = payload_kv.pop("_custom", []) if isinstance(payload_kv.get("_custom"), list) else []
 +    src_ip = _first(offense.get("source_ips")) or payload_kv.get("source_ip")
 +    dst_ip = _first(offense.get("destination_ips")) or payload_kv.get("destination_ip")
 +    username = _first(offense.get("usernames")) or payload_kv.get("username")
  
      # Date formatting: "21 Jul 2026, 09:29:58"
      from datetime import datetime as _dt
-@@ -666,7 +667,16 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+@@ -666,7 +668,20 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
      if log_source_str: optional_fields.append(("log_source", "Log source"))
  
      # Discover NEW fields dynamically from event payloads (LLM-style extraction via regex).
@@ -754,37 +815,44 @@ index d8c67ba..02ae702 100644
 +    if payload_kv.get("protocol"): pkv_fields.append(("Protocol", payload_kv["protocol"]))
 +    if payload_kv.get("action"): pkv_fields.append(("Action", payload_kv["action"]))
 +    if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
++    if payload_kv.get("application"): pkv_fields.append(("Application", payload_kv["application"]))
++    if payload_kv.get("bytes"): pkv_fields.append(("Bytes", payload_kv["bytes"]))
++    for lbl, val in custom_fields:
++        pkv_fields.append((lbl, val))
 +    discovered = pkv_fields + _discover_extra_fields(events)
 +    _seen_lbl = set()
 +    discovered = [(l, v) for (l, v) in discovered if not (l in _seen_lbl or _seen_lbl.add(l))]
      for label, value in discovered:
          key = f"x_{label.lower().replace(' ', '_')}"
          optional_fields.append((key, label))
-@@ -734,6 +744,55 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+@@ -734,6 +749,87 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
      return report_dict
  
  
-+def _parse_payload_kv(events: list[dict]) -> dict:
-+    """Parse key=value / LEEF attributes and 'Key: Value' pairs out of raw event
-+    payloads. Returns a normalised dict of common SOC fields (source_ip,
-+    destination_ip, source_port, destination_port, protocol, action, rule_name,
-+    username). LEEF example:
-+      LEEF:2.0|Check Point|VPN-1|1.0|Accept|src=1.2.3.4 dst=5.6.7.8 srcPort=443 ...
-+    """
++def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
++    """Extract SOC fields from event payloads AND the offense description text.
++    Handles LEEF/CEF `key=value`, `Key: Value`, QRadar summary text
++    ("Source IP(s) 1.2.3.4", "Destination IP(s) 5.6.7.8") and QRadar
++    "(custom)" properties ("Action Taken (custom) Assess", "Asset Name (custom) HOST",
++    "File Path (custom) C:\\..."). Custom properties are returned under "_custom"
++    as [(label, value), ...] so the report can surface them as extra fields."""
 +    import re as _re
-+    text = " ".join(
-+        [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
-+    )
++    parts = [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
++    for e in events or []:
++        if e.get("event_description"):
++            parts.append(str(e["event_description"]))
++    if offense and offense.get("description"):
++        parts.append(str(offense["description"]))
++    text = "  ".join(p for p in parts if p)
 +    if not text:
 +        return {}
-+    # Collect key=value tokens (values run until the next ' key=' or end).
++
 +    kv: dict[str, str] = {}
 +    for m in _re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)=([^=]*?)(?=\s+[A-Za-z_][A-Za-z0-9_.]*=|$)", text):
 +        k = m.group(1).strip().lower()
 +        v = m.group(2).strip().strip('"').strip("'")
 +        if v and k not in kv:
 +            kv[k] = v
-+    # Also capture 'Key: Value' style (Windows / generic).
 +    for m in _re.finditer(r"([A-Za-z][A-Za-z _]{1,30}?)\s*:\s*([^\n\r]+?)(?:\s{2,}|$)", text):
 +        k = m.group(1).strip().lower().replace(" ", "_")
 +        v = m.group(2).strip()
@@ -797,20 +865,49 @@ index d8c67ba..02ae702 100644
 +                return kv[n]
 +        return None
 +
++    def find_ip(label):
++        m = _re.search(r"(?i)" + label + r"\s*IP\(?s?\)?\s*[:(]*\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[0-9a-fA-F:]{4,})", text)
++        return m.group(1) if m else None
++
++    # QRadar "(custom)" properties
++    custom: list[tuple[str, str]] = []
++    seen = set()
++    for m in _re.finditer(
++        r"([A-Za-z][A-Za-z0-9 _/]{1,30}?)\s*\(custom\)\s*(.+?)"
++        r"(?=\s+[A-Za-z][A-Za-z0-9 _/]{1,30}?\s*\(custom\)|\s+Log Source\b|\s+Offense\b|\s+Event Description\b|\s+Destination IP\b|$)",
++        text):
++        lbl = m.group(1).strip()
++        val = m.group(2).strip()
++        if not val or lbl.lower() in seen:
++            continue
++        seen.add(lbl.lower())
++        custom.append((lbl, val[:300]))
++
 +    proto = pick("proto", "protocol", "protocolname")
 +    if proto and proto.isdigit():
 +        proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(proto, proto)
++    action = pick("action", "rule_action", "act")
++    if not action:
++        for lbl, val in custom:
++            if "action" in lbl.lower():
++                action = val
++                break
 +    out = {
-+        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip"),
-+        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost", "origin"),
++        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
++        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost") or find_ip("destination"),
 +        "source_port": pick("srcport", "source_port", "sport", "spt"),
-+        "destination_port": pick("dstport", "destination_port", "dport", "dpt", "service"),
++        "destination_port": pick("dstport", "destination_port", "dport", "dpt"),
 +        "protocol": proto,
-+        "action": pick("action", "rule_action", "act"),
-+        "rule_name": pick("rule_name", "rulename", "rule"),
++        "action": action,
++        "rule_name": pick("rule_name", "rulename"),
 +        "username": pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
++        "application": pick("app", "application", "appname", "requestclientapplication"),
++        "bytes": pick("bytes", "byte", "in", "out", "bytesin", "bytesout"),
 +    }
-+    return {k: v for k, v in out.items() if v}
++    res = {k: v for k, v in out.items() if v}
++    if custom:
++        res["_custom"] = custom
++    return res
 +
 +
  def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:
@@ -899,7 +996,7 @@ index 06bed50..fcc126c 100644
  .payload-viewer .ioc-ipv4 { color: var(--tg-red); font-weight: 600; }
  .payload-viewer .ioc-ipv4-priv { color: var(--tg-indigo); }
 diff --git a/frontend/src/pages/KnowledgeBasePage.jsx b/frontend/src/pages/KnowledgeBasePage.jsx
-index 05505d7..101f4c4 100644
+index 05505d7..a5a847f 100644
 --- a/frontend/src/pages/KnowledgeBasePage.jsx
 +++ b/frontend/src/pages/KnowledgeBasePage.jsx
 @@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
@@ -928,7 +1025,7 @@ index 05505d7..101f4c4 100644
    const [searching, setSearching] = useState(false);
    const [searchResults, setSearchResults] = useState(null);
 +  // Manual "add historical data" form
-+  const [manual, setManual] = useState({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
++  const [manual, setManual] = useState({ alert_name: "", analysis: "", impact: "", verdict: "", recommendations: "", ioc_enrichment: false });
 +  const [savingManual, setSavingManual] = useState(false);
 +  const [importingCsv, setImportingCsv] = useState(false);
 +
@@ -978,7 +1075,7 @@ index 05505d7..101f4c4 100644
        fd.append("kb_type", kbType);
        fd.append("file", file);
        await api.post("/kb/upload", fd, {
-@@ -82,31 +110,116 @@ export default function KnowledgeBasePage() {
+@@ -82,31 +110,129 @@ export default function KnowledgeBasePage() {
      } catch (e) { toast.error(e?.response?.data?.detail || "Retry failed"); }
    };
  
@@ -992,12 +1089,14 @@ index 05505d7..101f4c4 100644
 +        client_id: scope,
 +        alert_name: manual.alert_name.trim(),
 +        analysis: manual.analysis.trim(),
++        impact: manual.impact.trim() || null,
++        ioc_enrichment: !!manual.ioc_enrichment,
 +        verdict: manual.verdict || null,
 +        recommendations: manual.recommendations.split("\n").map((s) => s.trim()).filter(Boolean),
 +        kb_type: "historical_incident",
 +      });
 +      toast.success("Historical KB entry added");
-+      setManual({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
++      setManual({ alert_name: "", analysis: "", impact: "", verdict: "", recommendations: "", ioc_enrichment: false });
 +      load();
 +    } catch (e) {
 +      toast.error(e?.response?.data?.detail || "Failed to add entry");
@@ -1077,9 +1176,20 @@ index 05505d7..101f4c4 100644
 +        <div>
 +          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Analysis *</div>
 +          <textarea rows={4} value={manual.analysis} onChange={(e) => setManual({ ...manual, analysis: e.target.value })} data-testid="kb-manual-analysis"
-+            placeholder="Describe the investigation & conclusion. Tip: use {source_ip}, {username}, {destination_ip}, {offense_id}, {date_time} — they get replaced with the new offense's values."
++            placeholder="Describe the investigation & conclusion. Tip: use [Source IP], [Destination IP], [Protocol], [Destination Port], [Rule Name], [Start Time] — they get replaced with the new offense's values."
 +            className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
 +        </div>
++        <div>
++          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Impact (optional)</div>
++          <textarea rows={2} value={manual.impact} onChange={(e) => setManual({ ...manual, impact: e.target.value })} data-testid="kb-manual-impact"
++            placeholder="Business/security impact. Placeholders like [Destination IP] are also supported here."
++            className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
++        </div>
++        <label className="flex items-center gap-2 cursor-pointer select-none" data-testid="kb-manual-ioc-label">
++          <input type="checkbox" checked={manual.ioc_enrichment} onChange={(e) => setManual({ ...manual, ioc_enrichment: e.target.checked })} data-testid="kb-manual-ioc"
++            className="accent-cyan-400 w-4 h-4" />
++          <span className="text-xs font-mono text-neutral-300">IOC Enrichment — generate this section live from <span className="text-cyan-400">VirusTotal</span> (uses the offense's external IP)</span>
++        </label>
 +        <div>
 +          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Recommendations (one per line, optional)</div>
 +          <textarea rows={2} value={manual.recommendations} onChange={(e) => setManual({ ...manual, recommendations: e.target.value })} data-testid="kb-manual-recs"
@@ -1103,7 +1213,7 @@ index 05505d7..101f4c4 100644
        {/* Search preview - available to any authenticated analyst or admin */}
        <div className="tactical-panel p-4" data-testid="kb-search-preview">
          <div className="flex items-baseline justify-between mb-3">
-@@ -206,7 +319,12 @@ export default function KnowledgeBasePage() {
+@@ -206,7 +332,12 @@ export default function KnowledgeBasePage() {
                  }[e.status || "READY"] || "border-neutral-600 text-neutral-400";
                  return (
                  <tr key={e.id} className="border-b border-[#0F0F0F] hover:bg-[#111]" data-testid={`kb-row-${e.id}`}>

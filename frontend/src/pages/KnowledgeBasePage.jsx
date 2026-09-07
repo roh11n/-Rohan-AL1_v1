@@ -26,7 +26,7 @@ export default function KnowledgeBasePage() {
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState(null);
   // Manual "add historical data" form
-  const [manual, setManual] = useState({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
+  const [manual, setManual] = useState({ alert_name: "", analysis: "", impact: "", verdict: "", recommendations: "", ioc_enrichment: false });
   const [savingManual, setSavingManual] = useState(false);
   const [importingCsv, setImportingCsv] = useState(false);
 
@@ -120,12 +120,14 @@ export default function KnowledgeBasePage() {
         client_id: scope,
         alert_name: manual.alert_name.trim(),
         analysis: manual.analysis.trim(),
+        impact: manual.impact.trim() || null,
+        ioc_enrichment: !!manual.ioc_enrichment,
         verdict: manual.verdict || null,
         recommendations: manual.recommendations.split("\n").map((s) => s.trim()).filter(Boolean),
         kb_type: "historical_incident",
       });
       toast.success("Historical KB entry added");
-      setManual({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
+      setManual({ alert_name: "", analysis: "", impact: "", verdict: "", recommendations: "", ioc_enrichment: false });
       load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to add entry");
@@ -197,9 +199,20 @@ export default function KnowledgeBasePage() {
         <div>
           <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Analysis *</div>
           <textarea rows={4} value={manual.analysis} onChange={(e) => setManual({ ...manual, analysis: e.target.value })} data-testid="kb-manual-analysis"
-            placeholder="Describe the investigation & conclusion. Tip: use {source_ip}, {username}, {destination_ip}, {offense_id}, {date_time} — they get replaced with the new offense's values."
+            placeholder="Describe the investigation & conclusion. Tip: use [Source IP], [Destination IP], [Protocol], [Destination Port], [Rule Name], [Start Time] — they get replaced with the new offense's values."
             className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
         </div>
+        <div>
+          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Impact (optional)</div>
+          <textarea rows={2} value={manual.impact} onChange={(e) => setManual({ ...manual, impact: e.target.value })} data-testid="kb-manual-impact"
+            placeholder="Business/security impact. Placeholders like [Destination IP] are also supported here."
+            className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer select-none" data-testid="kb-manual-ioc-label">
+          <input type="checkbox" checked={manual.ioc_enrichment} onChange={(e) => setManual({ ...manual, ioc_enrichment: e.target.checked })} data-testid="kb-manual-ioc"
+            className="accent-cyan-400 w-4 h-4" />
+          <span className="text-xs font-mono text-neutral-300">IOC Enrichment — generate this section live from <span className="text-cyan-400">VirusTotal</span> (uses the offense's external IP)</span>
+        </label>
         <div>
           <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Recommendations (one per line, optional)</div>
           <textarea rows={2} value={manual.recommendations} onChange={(e) => setManual({ ...manual, recommendations: e.target.value })} data-testid="kb-manual-recs"

@@ -630,7 +630,8 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if log_source_name:
         log_source_str = f"{log_source_name} @ {log_source_ip}" if log_source_ip else log_source_name
 
-    payload_kv = _parse_payload_kv(events)
+    payload_kv = _parse_payload_kv(events, offense=offense)
+    custom_fields = payload_kv.pop("_custom", []) if isinstance(payload_kv.get("_custom"), list) else []
     src_ip = _first(offense.get("source_ips")) or payload_kv.get("source_ip")
     dst_ip = _first(offense.get("destination_ips")) or payload_kv.get("destination_ip")
     username = _first(offense.get("usernames")) or payload_kv.get("username")
@@ -674,6 +675,10 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if payload_kv.get("protocol"): pkv_fields.append(("Protocol", payload_kv["protocol"]))
     if payload_kv.get("action"): pkv_fields.append(("Action", payload_kv["action"]))
     if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
+    if payload_kv.get("application"): pkv_fields.append(("Application", payload_kv["application"]))
+    if payload_kv.get("bytes"): pkv_fields.append(("Bytes", payload_kv["bytes"]))
+    for lbl, val in custom_fields:
+        pkv_fields.append((lbl, val))
     discovered = pkv_fields + _discover_extra_fields(events)
     _seen_lbl = set()
     discovered = [(l, v) for (l, v) in discovered if not (l in _seen_lbl or _seen_lbl.add(l))]
@@ -744,27 +749,30 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     return report_dict
 
 
-def _parse_payload_kv(events: list[dict]) -> dict:
-    """Parse key=value / LEEF attributes and 'Key: Value' pairs out of raw event
-    payloads. Returns a normalised dict of common SOC fields (source_ip,
-    destination_ip, source_port, destination_port, protocol, action, rule_name,
-    username). LEEF example:
-      LEEF:2.0|Check Point|VPN-1|1.0|Accept|src=1.2.3.4 dst=5.6.7.8 srcPort=443 ...
-    """
+def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
+    """Extract SOC fields from event payloads AND the offense description text.
+    Handles LEEF/CEF `key=value`, `Key: Value`, QRadar summary text
+    ("Source IP(s) 1.2.3.4", "Destination IP(s) 5.6.7.8") and QRadar
+    "(custom)" properties ("Action Taken (custom) Assess", "Asset Name (custom) HOST",
+    "File Path (custom) C:\\..."). Custom properties are returned under "_custom"
+    as [(label, value), ...] so the report can surface them as extra fields."""
     import re as _re
-    text = " ".join(
-        [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
-    )
+    parts = [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
+    for e in events or []:
+        if e.get("event_description"):
+            parts.append(str(e["event_description"]))
+    if offense and offense.get("description"):
+        parts.append(str(offense["description"]))
+    text = "  ".join(p for p in parts if p)
     if not text:
         return {}
-    # Collect key=value tokens (values run until the next ' key=' or end).
+
     kv: dict[str, str] = {}
     for m in _re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)=([^=]*?)(?=\s+[A-Za-z_][A-Za-z0-9_.]*=|$)", text):
         k = m.group(1).strip().lower()
         v = m.group(2).strip().strip('"').strip("'")
         if v and k not in kv:
             kv[k] = v
-    # Also capture 'Key: Value' style (Windows / generic).
     for m in _re.finditer(r"([A-Za-z][A-Za-z _]{1,30}?)\s*:\s*([^\n\r]+?)(?:\s{2,}|$)", text):
         k = m.group(1).strip().lower().replace(" ", "_")
         v = m.group(2).strip()
@@ -777,20 +785,49 @@ def _parse_payload_kv(events: list[dict]) -> dict:
                 return kv[n]
         return None
 
+    def find_ip(label):
+        m = _re.search(r"(?i)" + label + r"\s*IP\(?s?\)?\s*[:(]*\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[0-9a-fA-F:]{4,})", text)
+        return m.group(1) if m else None
+
+    # QRadar "(custom)" properties
+    custom: list[tuple[str, str]] = []
+    seen = set()
+    for m in _re.finditer(
+        r"([A-Za-z][A-Za-z0-9 _/]{1,30}?)\s*\(custom\)\s*(.+?)"
+        r"(?=\s+[A-Za-z][A-Za-z0-9 _/]{1,30}?\s*\(custom\)|\s+Log Source\b|\s+Offense\b|\s+Event Description\b|\s+Destination IP\b|$)",
+        text):
+        lbl = m.group(1).strip()
+        val = m.group(2).strip()
+        if not val or lbl.lower() in seen:
+            continue
+        seen.add(lbl.lower())
+        custom.append((lbl, val[:300]))
+
     proto = pick("proto", "protocol", "protocolname")
     if proto and proto.isdigit():
         proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(proto, proto)
+    action = pick("action", "rule_action", "act")
+    if not action:
+        for lbl, val in custom:
+            if "action" in lbl.lower():
+                action = val
+                break
     out = {
-        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip"),
-        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost", "origin"),
+        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
+        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost") or find_ip("destination"),
         "source_port": pick("srcport", "source_port", "sport", "spt"),
-        "destination_port": pick("dstport", "destination_port", "dport", "dpt", "service"),
+        "destination_port": pick("dstport", "destination_port", "dport", "dpt"),
         "protocol": proto,
-        "action": pick("action", "rule_action", "act"),
-        "rule_name": pick("rule_name", "rulename", "rule"),
+        "action": action,
+        "rule_name": pick("rule_name", "rulename"),
         "username": pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
+        "application": pick("app", "application", "appname", "requestclientapplication"),
+        "bytes": pick("bytes", "byte", "in", "out", "bytesin", "bytesout"),
     }
-    return {k: v for k, v in out.items() if v}
+    res = {k: v for k, v in out.items() if v}
+    if custom:
+        res["_custom"] = custom
+    return res
 
 
 def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:

@@ -721,23 +721,55 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     manual_entries = await db.kb_entries.find(
         {"entry_kind": "manual", "client_id": {"$in": [doc["client_id"], "ALL"]}},
         {"_id": 0},
-    ).to_list(500)
+    ).sort("uploaded_at", -1).to_list(500)
     matched_kb, match_score = kb_template.find_best_template(doc, manual_entries)
     rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
 
-    # Base report: KB-template if a manual entry matches the alert name, else rule engine.
-    if matched_kb:
-        base_mssp = kb_template.build_kb_template_report(
-            doc, doc.get("events") or [], matched_kb, rule_engine_mssp, match_score)
-        base_source = "kb-template"
-    else:
-        base_mssp = dict(rule_engine_mssp)
-        base_mssp.setdefault("generated_by", "rule-engine")
-        base_source = "rule-engine"
-    analysis["mssp_report"] = base_mssp
-    analysis["mssp_report_source"] = base_source
+    # Base report is always the rule-engine report (carries extracted fields);
+    # the KB-template builder consumes it and populates the sections.
+    base_mssp = dict(rule_engine_mssp)
+    base_mssp.setdefault("generated_by", "rule-engine")
+    base_source = "rule-engine"
+    # KB mode — deterministic template adaptation (instant, always available).
+    def _is_public(ip):
+        return bool(ip) and not re.match(r"^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fe80:|fc|fd)", str(ip))
 
-    # In LLM mode, Qwen refines the report in the BACKGROUND (CPU generation
+    async def _vt_enrich(base_mssp):
+        """Live VirusTotal IOC enrichment for the offense's external IP."""
+        if not matched_kb or not matched_kb.get("ioc_enrichment"):
+            return None
+        if not (ti_cfg.get("virustotal_enabled") and (ti_cfg.get("virustotal_api_keys") or ti_cfg.get("virustotal_api_key"))):
+            return None
+        from threat_intel import parse_vt_keys, vt_ip
+        keys = parse_vt_keys(ti_cfg.get("virustotal_api_keys", ""), ti_cfg.get("virustotal_api_key", ""))
+        ext = next((ip for ip in (base_mssp.get("destination_ip"), base_mssp.get("source_ip")) if _is_public(ip)), None)
+        if not ext or not keys:
+            return None
+        try:
+            r = await asyncio.get_event_loop().run_in_executor(None, vt_ip, ext, keys)
+        except Exception:
+            r = None
+        if not r:
+            return None
+        url = f"https://www.virustotal.com/gui/ip-address/{ext}"
+        score = f"{r.get('malicious', 0)} malicious / {r.get('suspicious', 0)} suspicious"
+        return {
+            "ip": ext, "as_owner": r.get("as_owner"), "country": r.get("country"),
+            "score": score, "url": url,
+            "text": (f"We reviewed IP {ext} against VirusTotal. It belongs to "
+                     f"{r.get('as_owner') or 'an unknown provider'} and is geolocated in "
+                     f"{r.get('country') or 'an unknown country'}. Reputation: {score}. "
+                     f"IOC Reference (VirusTotal): {url}"),
+        }
+
+    if matched_kb:
+        vt_enrich = await _vt_enrich(base_mssp)
+        analysis["mssp_report"] = kb_template.build_kb_template_report(
+            doc, doc.get("events") or [], matched_kb, base_mssp, match_score, vt=vt_enrich)
+        analysis["mssp_report_source"] = "kb-template"
+    else:
+        analysis["mssp_report"] = base_mssp
+        analysis["mssp_report_source"] = base_source
     # exceeds the ingress request window). The response returns immediately with
     # the KB/rule report stamped llm_status="pending"; the UI polls for the update.
     schedule_llm = analysis_mode == "llm"
@@ -1411,6 +1443,8 @@ class KBManualRequest(BaseModel):
     client_id: str  # a client id OR "ALL" for a global entry applicable to every tenant
     alert_name: str
     analysis: str
+    impact: Optional[str] = None
+    ioc_enrichment: bool = False  # generate IOC Enrichment section live from VirusTotal
     verdict: Optional[str] = None  # TP | FP | Suspicious
     recommendations: List[str] = []
     kb_type: str = "historical_incident"
@@ -1419,8 +1453,8 @@ class KBManualRequest(BaseModel):
 @api.post("/kb/manual")
 async def add_kb_manual(payload: KBManualRequest,
                         user: dict = Depends(require_roles([UserRole.ADMIN, UserRole.SOC_MANAGER, UserRole.L2, UserRole.L3]))):
-    """Add historical analysis data by hand (Name + Analysis [+ Verdict, Recommendations]).
-    Stored structured (for the KB-template matcher) AND vector-indexed (for RAG retrieval).
+    """Add historical analysis data by hand. Sections: Analysis, Impact,
+    Recommendations, and optional IOC Enrichment (generated live from VirusTotal).
     Use client_id="ALL" to make the entry apply to every tenant."""
     _assert_tenant_access(user, payload.client_id)
     if not payload.alert_name.strip() or not payload.analysis.strip():
@@ -1440,6 +1474,8 @@ async def add_kb_manual(payload: KBManualRequest,
         entry_kind="manual",
         alert_name=payload.alert_name.strip(),
         analysis=payload.analysis.strip(),
+        impact=(payload.impact or "").strip() or None,
+        ioc_enrichment=bool(payload.ioc_enrichment),
         verdict=verdict,
         recommendations=recs,
         rag_source=source,
@@ -1488,21 +1524,27 @@ async def import_kb_csv(client_id: str = Form(...), file: UploadFile = File(...)
     loop = asyncio.get_event_loop()
     for raw in reader:
         row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items() if k}
-        alert = g(row, "alert_name", "alert", "rule_name", "rule", "name", "title", "use_case", "usecase", "offense_name", "offense")
-        analysis = g(row, "analysis", "description", "summary", "details", "resolution", "comment", "comments", "notes")
+        alert = g(row, "alert_name", "alert", "rule_name", "rule", "name", "title", "use_case", "usecase", "offense_name", "offense", "signature")
+        analysis = g(row, "analysis", "itsm_analysis", "analyst_analysis", "l1_analysis", "soc_analysis", "description", "summary", "details", "resolution", "close_notes", "closenotes", "comment", "comments", "notes")
+        impact = g(row, "itsm_impact", "impact", "business_impact")
         if not alert or not analysis:
             skipped += 1
             continue
-        vraw = g(row, "verdict", "disposition", "classification", "conclusion").upper()
-        verdict = ("TP" if ("TRUE" in vraw or vraw == "TP") else
-                   "FP" if ("FALSE" in vraw or vraw == "FP") else
+        vraw = g(row, "verdict", "disposition", "classification", "conclusion", "closereason", "close_reason").upper()
+        verdict = ("FP" if ("FALSE" in vraw or "FP" in vraw or "BENIGN" in vraw or "NOT AN ISSUE" in vraw) else
+                   "TP" if ("TRUE" in vraw or vraw.strip() == "TP" or "CONFIRMED" in vraw or "MALICIOUS" in vraw) else
                    "Suspicious" if "SUSP" in vraw else None)
-        recs_raw = g(row, "recommendations", "recommendation", "action", "actions", "remediation")
+        recs_raw = g(row, "recommendations", "itsm_recommendations", "recommendation", "action", "actions", "remediation")
+        ioc_raw = g(row, "ioc_enrichment", "ioc", "enrichment").lower()
+        ioc = (ioc_raw in ("1", "true", "yes", "y") or
+               "ioc enrichment" in (analysis or "").lower() or
+               "virustotal" in (analysis or "").lower() or "abuseipdb" in (analysis or "").lower())
         recs = [x.strip() for x in re.split(r"[\n;|]+", recs_raw) if x.strip()]
         source = f"csv-{uuid.uuid4().hex[:12]}"
         entry = KBEntry(client_id=client_id, kb_type="historical_incident", filename=alert,
                         content_summary=analysis[:280], document_count=0, status="READY",
-                        entry_kind="manual", alert_name=alert, analysis=analysis, verdict=verdict,
+                        entry_kind="manual", alert_name=alert, analysis=analysis,
+                        impact=impact or None, ioc_enrichment=ioc, verdict=verdict,
                         recommendations=recs, rag_source=source, uploaded_by=user["email"],
                         completed_at=_now())
         await db.kb_entries.insert_one(entry.model_dump())

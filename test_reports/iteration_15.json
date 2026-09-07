@@ -1,0 +1,24 @@
+{
+  "summary": "Verified dynamic KB Template system end-to-end. Manual KB form (kb-manual-name/analysis/impact/verdict/recs/ioc) saves and shows MANUAL tag. Offense 316316 (IND-UC-00316 Permit Connections CTI_IP Feeds Outbound) MSSP Report renders four sections in order [Analysis]/[IOC Enrichment]/[Impact]/[Recommendations] with placeholders filled (Source IP 192.168.1.50, Destination IP 8.8.8.8, TCP, port 443, rule Allow-Web-Outbound, app ssl) and LIVE VirusTotal enrichment (Google LLC, US, VT URL). Quoted placeholders in recommendations replaced ('block the IP address 8.8.8.8', 'firewall rule Allow-Web-Outbound'). Verdict SUSPICIOUS badge shown, KB TEMPLATE · 100% badge shown. Regression offense 1651114 (IND-UC-00508) still investigates: verdict FP, src 192.168.181.102 dst 52.163.83.68, KB template matched 100%.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Layout header client selector", "issues": ["Recurring React hydration warning at Layout.jsx:122 (<span data-ve-dynamic> child of <option>). Cosmetic; already reported in iter_12/13/14."]}
+    ]
+  },
+  "test_report_links": ["/app/test_reports/mssp_316316.png"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Layout.jsx line 122 still nests <span data-ve-dynamic> inside <option>. Persistent React hydration warning across all pages."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100% (15/15 checks + regression pass)"},
+  "test_credentials": "admin@socpilot.ai / Admin@12345",
+  "seed_data_creation": "Created one manual KB entry named TEST_KB_MANUAL_<epoch> in Acme Financial during UI test (not cleaned; kb documents DELETE endpoint returned 405). Main agent can delete via KB list Actions column if desired.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Offense 316316 (id=7099db2b-416d-4aa7-bad7-827158e7d412, Acme Financial 4cb11f78-4281-4057-bc70-459668761926) works fully. MSSP tab requires clicking text=mssp report (no role=tab). btn-investigate is on offense list rows but the offense page can also be reached directly via /offenses/{id} and Re-run AI Analysis is required to (re)generate the KB template response with fresh VT. VT enrichment adds ~5-8s latency. Manual KB endpoint requires client_id + alert_name in POST body (not name). Analysis mode confirmed 'kb' in /api/settings.",
+  "rca of the issue": "N/A - feature works as designed."
+}
