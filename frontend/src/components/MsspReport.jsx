@@ -130,6 +130,15 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
           )}
         </div>
         <div className="flex items-center gap-2">
+          {report.generated_by && !editing && (
+            <span className="tg-model" data-testid={`${testId}-source`} title={report.generated_by}>
+              {report.generated_by.startsWith("kb-template")
+                ? `KB Template${report.kb_template_score ? ` · ${report.kb_template_score}%` : ""}`
+                : report.generated_by.startsWith("llm")
+                  ? "Local LLM"
+                  : "Rule Engine"}
+            </span>
+          )}
           {report.verdict && !editing && (
             <span className="tg-sev" data-testid={`${testId}-verdict`}
                   style={{ background: verdictColor.bg, borderColor: verdictColor.border, color: verdictColor.fg }}>

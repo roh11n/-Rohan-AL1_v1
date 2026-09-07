@@ -23,6 +23,7 @@ export default function OffenseDetailPage() {
   const [investigating, setInvestigating] = useState(false);
   const [creatingTicket, setCreatingTicket] = useState(false);
   const [highlight, setHighlight] = useState(null);
+  const [llmPending, setLlmPending] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -31,12 +32,35 @@ export default function OffenseDetailPage() {
   };
   useEffect(() => { load(); }, [id]);
 
+  // Poll while the local LLM is refining the report in the background.
+  useEffect(() => {
+    const status = off?.ai_analysis?.llm_status;
+    setLlmPending(status === "pending");
+    if (status !== "pending") return;
+    const t = setInterval(async () => {
+      try {
+        const r = await api.get(`/offenses/${id}`);
+        setOff(r.data);
+        const s = r.data?.ai_analysis?.llm_status;
+        if (s !== "pending") {
+          if (s === "done") toast.success("Local LLM finished refining the report");
+          else if (s === "failed") toast.message("LLM unavailable — showing KB/rule analysis");
+        }
+      } catch (e) {}
+    }, 5000);
+    return () => clearInterval(t);
+    /* eslint-disable-next-line */
+  }, [off?.ai_analysis?.llm_status, id]);
+
   const investigate = async () => {
     setInvestigating(true);
     try {
-      const r = await api.post(`/offenses/${id}/investigate`);
+      const r = await api.post(`/offenses/${id}/investigate`, {}, { timeout: 240000 });
       setOff(r.data);
-      toast.success(`AI investigation complete. Risk: ${r.data.risk_score}/100`);
+      if (r.data?.ai_analysis?.llm_status === "pending")
+        toast.success("Analysis ready — local LLM (Qwen) is refining it in the background…");
+      else
+        toast.success(`AI investigation complete. Risk: ${r.data.risk_score}/100`);
       setTab("mssp_report");
     } catch (e) { toast.error(e?.response?.data?.detail || "Investigation failed"); }
     finally { setInvestigating(false); }
@@ -138,6 +162,12 @@ export default function OffenseDetailPage() {
 
       {/* Tab content */}
       <div className="fade-in-up">
+        {llmPending && (
+          <div className="mb-3 flex items-center gap-2 border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-mono text-cyan-300" data-testid="llm-pending-banner">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            Local LLM (Qwen) is refining this report in the background — showing KB/rule analysis meanwhile. This updates automatically.
+          </div>
+        )}
         {tab === "summary" && <SummaryTab off={off} analysis={analysis} />}
         {tab === "mssp_report" && <MsspReport report={analysis.mssp_report} testId="offense-mssp-report"
             offenseId={off.id}

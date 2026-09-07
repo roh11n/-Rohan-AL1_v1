@@ -155,6 +155,13 @@ class KBEntry(BaseModel):
     uploaded_by: str = ""
     uploaded_at: str = Field(default_factory=_now)
     completed_at: Optional[str] = None
+    # Manual "historical data" entries (entry_kind="manual") carry structured fields
+    entry_kind: str = "file"  # file | manual | analyst_feedback
+    alert_name: Optional[str] = None
+    analysis: Optional[str] = None
+    verdict: Optional[str] = None  # TP | FP | Suspicious
+    recommendations: List[str] = Field(default_factory=list)
+    rag_source: Optional[str] = None
 
 
 # ----- Settings -----
@@ -169,13 +176,14 @@ class QRadarSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     provider: str = "local"  # local | huggingface | ollama
-    model_name: str = "Qwen/Qwen2.5-3B-Instruct"
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    analysis_mode: str = "kb"  # kb (deterministic template) | llm (local Qwen)
     endpoint_url: str = ""
     api_token: str = ""
     max_tokens: int = 512
     temperature: float = 0.3
-    enable_llm: bool = False  # off by default - uses rule engine
-    llm_step_timeout_seconds: int = 180  # per-step timeout for LLM inference (CPU)
+    enable_llm: bool = False  # legacy flag; analysis_mode drives behaviour
+    llm_step_timeout_seconds: int = 90  # per-step timeout for LLM inference (CPU)
 
 
 class IntegrationCred(BaseModel):

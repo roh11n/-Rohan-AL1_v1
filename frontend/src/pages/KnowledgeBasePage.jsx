@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import { useClients } from "@/lib/clients";
 import { toast } from "sonner";
-import { Upload, Trash2, FileText, Database, Search, RefreshCw } from "lucide-react";
+import { Upload, Trash2, FileText, Database, Search, RefreshCw, PlusCircle, PenLine } from "lucide-react";
 
 const KB_TYPES = [
   { value: "network_hierarchy", label: "Network Hierarchy" },
@@ -12,8 +12,11 @@ const KB_TYPES = [
   { value: "playbook", label: "Playbooks" },
 ];
 
+const ALL_SCOPE = "ALL";
+
 export default function KnowledgeBasePage() {
   const { activeClientId, clients } = useClients();
+  const [scope, setScope] = useState(activeClientId || "");
   const [entries, setEntries] = useState([]);
   const [kbStatus, setKbStatus] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -22,17 +25,23 @@ export default function KnowledgeBasePage() {
   const [searchQ, setSearchQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState(null);
+  // Manual "add historical data" form
+  const [manual, setManual] = useState({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
+  const [savingManual, setSavingManual] = useState(false);
+
+  // Keep scope in sync when the global active client first resolves.
+  useEffect(() => { if (!scope && activeClientId) setScope(activeClientId); /* eslint-disable-next-line */ }, [activeClientId]);
 
   const load = async () => {
-    if (!activeClientId) return;
+    if (!scope) return;
     const [r, s] = await Promise.all([
-      api.get(`/kb?client_id=${activeClientId}`),
+      api.get(`/kb?client_id=${scope}`),
       api.get("/kb/status"),
     ]);
     setEntries(r.data || []);
     setKbStatus(s.data);
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [activeClientId]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [scope]);
 
   // Auto-poll while any entry is still PROCESSING
   useEffect(() => {
@@ -49,7 +58,7 @@ export default function KnowledgeBasePage() {
     setUploading(true);
     try {
       const fd = new FormData();
-      fd.append("client_id", activeClientId);
+      fd.append("client_id", scope);
       fd.append("kb_type", kbType);
       fd.append("file", file);
       await api.post("/kb/upload", fd, {
@@ -82,30 +91,107 @@ export default function KnowledgeBasePage() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Retry failed"); }
   };
 
+  const addManual = async (e) => {
+    e.preventDefault();
+    if (!manual.alert_name.trim() || !manual.analysis.trim())
+      return toast.error("Alert name and analysis are required");
+    setSavingManual(true);
+    try {
+      await api.post("/kb/manual", {
+        client_id: scope,
+        alert_name: manual.alert_name.trim(),
+        analysis: manual.analysis.trim(),
+        verdict: manual.verdict || null,
+        recommendations: manual.recommendations.split("\n").map((s) => s.trim()).filter(Boolean),
+        kb_type: "historical_incident",
+      });
+      toast.success("Historical KB entry added");
+      setManual({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to add entry");
+    } finally { setSavingManual(false); }
+  };
+
   const runSearch = async (e) => {
     e?.preventDefault();
     if (!searchQ.trim()) return;
     setSearching(true);
     try {
       const r = await api.post("/kb/search", {
-        client_id: activeClientId, query: searchQ, n_results: 8,
+        client_id: scope, query: searchQ, n_results: 8,
       });
       setSearchResults(r.data);
     } catch (e) { toast.error(e?.response?.data?.detail || "Search failed"); }
     finally { setSearching(false); }
   };
 
-  const client = clients.find((c) => c.id === activeClientId);
+  const scopeOptions = [...clients.map((c) => ({ id: c.id, name: c.name })), { id: ALL_SCOPE, name: "All Tenants (global)" }];
+  const scopeLabel = scope === ALL_SCOPE ? "All Tenants" : (clients.find((c) => c.id === scope)?.name || "—");
 
   return (
     <div className="space-y-5" data-testid="kb-page">
-      <div>
-        <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">// TENANT KNOWLEDGE</div>
-        <h1 className="font-display text-3xl mt-1">Knowledge Base</h1>
-        <p className="text-neutral-400 text-sm mt-1">
-          Per-tenant RAG corpus for <span className="text-cyan-400 font-mono">{client?.name}</span>. Uploaded documents are chunked and embedded for retrieval during AI investigation.
-        </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">// TENANT KNOWLEDGE</div>
+          <h1 className="font-display text-3xl mt-1">Knowledge Base</h1>
+          <p className="text-neutral-400 text-sm mt-1">
+            RAG corpus for <span className="text-cyan-400 font-mono">{scopeLabel}</span>. Documents & manual entries are embedded for retrieval during AI investigation.
+          </p>
+        </div>
+        <div data-testid="kb-scope">
+          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">KB Scope</div>
+          <select value={scope} onChange={(e) => setScope(e.target.value)} data-testid="kb-scope-select"
+            className="bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2 min-w-[220px]">
+            {scopeOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+          </select>
+        </div>
       </div>
+
+      {/* Add historical data manually */}
+      <form onSubmit={addManual} className="tactical-panel p-5 space-y-3" data-testid="kb-manual-form">
+        <div className="flex items-center gap-2">
+          <PenLine className="w-4 h-4 text-cyan-400" strokeWidth={1.5} />
+          <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">// ADD HISTORICAL DATA (MANUAL)</div>
+        </div>
+        <p className="text-[11px] text-neutral-500 -mt-1">
+          Record a known alert's analysis once. When a future offense has the same alert name, the AI reuses this analysis as a template (swapping in the new offense's artifacts).
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Alert / Rule Name *</div>
+            <input value={manual.alert_name} onChange={(e) => setManual({ ...manual, alert_name: e.target.value })} data-testid="kb-manual-name"
+              placeholder="e.g. Multiple Login Failures for Single Username"
+              className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
+          </div>
+          <div>
+            <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Verdict (optional)</div>
+            <select value={manual.verdict} onChange={(e) => setManual({ ...manual, verdict: e.target.value })} data-testid="kb-manual-verdict"
+              className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2">
+              <option value="">— none —</option>
+              <option value="TP">TP (True Positive)</option>
+              <option value="FP">FP (False Positive)</option>
+              <option value="Suspicious">Suspicious</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Analysis *</div>
+          <textarea rows={4} value={manual.analysis} onChange={(e) => setManual({ ...manual, analysis: e.target.value })} data-testid="kb-manual-analysis"
+            placeholder="Describe the investigation & conclusion. Tip: use {source_ip}, {username}, {destination_ip}, {offense_id}, {date_time} — they get replaced with the new offense's values."
+            className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
+        </div>
+        <div>
+          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Recommendations (one per line, optional)</div>
+          <textarea rows={2} value={manual.recommendations} onChange={(e) => setManual({ ...manual, recommendations: e.target.value })} data-testid="kb-manual-recs"
+            placeholder={"Confirm activity with {username}\nTune the detection rule if benign"}
+            className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
+        </div>
+        <button type="submit" disabled={savingManual} data-testid="kb-manual-submit"
+          className="bg-cyan-400 hover:bg-cyan-300 text-black px-4 py-2 text-xs font-mono uppercase tracking-widest font-bold inline-flex items-center gap-2 disabled:opacity-50">
+          <PlusCircle className="w-3.5 h-3.5" />{savingManual ? "Saving..." : "Add to Knowledge Base"}
+        </button>
+      </form>
 
       {/* Search preview - available to any authenticated analyst or admin */}
       <div className="tactical-panel p-4" data-testid="kb-search-preview">
@@ -206,7 +292,12 @@ export default function KnowledgeBasePage() {
                 }[e.status || "READY"] || "border-neutral-600 text-neutral-400";
                 return (
                 <tr key={e.id} className="border-b border-[#0F0F0F] hover:bg-[#111]" data-testid={`kb-row-${e.id}`}>
-                  <td className="px-3 py-2 text-cyan-400 text-xs uppercase">{e.kb_type}</td>
+                  <td className="px-3 py-2 text-cyan-400 text-xs uppercase">
+                    {e.kb_type}
+                    {e.entry_kind === "manual" && (
+                      <span className="ml-2 inline-block px-1.5 py-0.5 text-[9px] border border-cyan-500/40 text-cyan-300 tracking-widest">MANUAL{e.verdict ? ` · ${e.verdict}` : ""}</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-neutral-100 inline-flex items-center gap-2"><FileText className="w-3 h-3 text-neutral-500" />{e.filename}</td>
                   <td className="px-3 py-2">
                     <span data-testid={`kb-status-${e.id}`}

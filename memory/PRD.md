@@ -33,6 +33,14 @@ Frontend: REACT_APP_BACKEND_URL (preserved).
 - Only additive file from testing: backend/tests/test_smoke_deploy.py (regression smoke suite; run with `-n 0`).
 - Local LLM report gen may be slow on CPU; falls back to rule engine (expected).
 
+## Feature: Local Qwen LLM + KB-driven analysis (2026-06)
+- **Analysis engine switch** (Settings → Local LLM): `KB Template` vs `Local LLM`, persisted in `LLMSettings.analysis_mode`.
+- **KB mode (default, instant)**: `kb_template.py` matches an offense's alert/rule name to a KB entry and reuses its analysis, swapping in the new offense's artifacts (source/dest IP, username, time, offense id). Placeholders `{source_ip}`, `{username}`, etc. supported. MSSP badge shows "KB Template · <score>%".
+- **LLM mode (real local Qwen)**: `Qwen/Qwen2.5-0.5B-Instruct` (CPU) runs in the BACKGROUND (`_run_llm_report_bg` + `build_llm_mssp_report_oneshot`); investigate returns instantly with `llm_status=pending`, UI shows a banner and polls, badge flips to "Local LLM" in ~15-20s. Graceful fallback to KB/rule on timeout/failure. Deps: `accelerate` added (needed for `device_map=cpu`).
+- **Manual KB "historical data"** (`POST /api/kb/manual`, KB page form): Alert/Rule Name, Analysis, Verdict (TP/FP/Suspicious), Recommendations. Stored structured + vector-indexed.
+- **Global "All Tenants" KB scope** (`client_id="ALL"`): entries apply to every client; KB page has a scope selector.
+- Verified: iteration_11 backend 4/4 + frontend 100%.
+
 ## Backlog / Next Steps
 - P1: When ready, rotate/replace VT key; add AbuseIPDB/MISP keys in Settings.
 - P2: Public URL — redo env wiring for a hosted target (separate phase).

@@ -385,7 +385,7 @@ def _step3_verify(model_name: str, offense: dict, events: list[dict],
 def build_llm_mssp_report(offense: dict, events: list[dict],
                           kb_matches: list[dict],
                           rule_engine_mssp: dict,
-                          model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+                          model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
                           temperature: float = 0.3,
                           step_timeout_seconds: int = 180) -> dict | None:
     """Run the 3-step LLM chain. Returns a full MSSP report dict on success, else None.
@@ -464,3 +464,87 @@ def build_llm_mssp_report(offense: dict, events: list[dict],
 
 def load_error() -> str | None:
     return _STATE.get("load_error")
+
+
+def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
+                                  kb_matches: list[dict],
+                                  rule_engine_mssp: dict,
+                                  model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+                                  temperature: float = 0.3,
+                                  timeout_seconds: int = 240) -> dict | None:
+    """Single compact local-LLM pass producing the MSSP analysis. Reuses the
+    rule-engine's already-extracted fields and asks the model for a SHORT JSON
+    (few analysis lines) so generation stays affordable on CPU. Intended to run
+    in the background. Returns a drop-in mssp_report dict, or None to fall back."""
+    started = time.time()
+    try:
+        sys_msg = (
+            "You are a SOC L1 analyst. Using the offense, its events and the knowledge-base "
+            "reference (a prior incident with the SAME alert name), write the analysis for THIS "
+            "offense. Reuse the reference's reasoning and verdict, but replace its artifacts with "
+            "THIS offense's actual artifacts (source IP, destination IP, username, time). "
+            "Return ONLY compact JSON: {\"analysis_lines\":[{\"n\":1,\"text\":\"...\"}],"
+            "\"verdict\":\"TP|FP|Suspicious\",\"verdict_reason\":\"...\","
+            "\"recommendations\":[\"...\"]}. Use 3-5 short analysis_lines."
+        )
+        user_msg = (
+            "Offense:\n" + _fmt_offense(offense) + "\n"
+            "Top events:\n" + _fmt_events(events, limit=3) + "\n\n"
+            "Knowledge-base reference (adapt this):\n" + _weighted_kb_context(kb_matches, max_docs=2) + "\n\n"
+            "Return ONLY the JSON object."
+        )
+        reply = _chat_with_timeout(
+            model_name,
+            [{"role": "system", "content": sys_msg},
+             {"role": "user", "content": user_msg}],
+            max_new_tokens=320, temperature=temperature, timeout_seconds=timeout_seconds,
+        )
+        parsed = _extract_json(reply)
+        if not isinstance(parsed, dict):
+            return None
+        v = str(parsed.get("verdict") or "").strip()
+        if v not in ("TP", "FP", "Suspicious"):
+            low = v.lower()
+            v = "FP" if "false" in low else ("TP" if "true" in low else "Suspicious")
+        reason = str(parsed.get("verdict_reason") or "").strip()
+        recs = [str(r)[:2000] for r in (parsed.get("recommendations") or []) if str(r).strip()]
+
+        # Model's analysis lines (weak 0.5B models often leave these empty and
+        # push the reasoning into verdict_reason — so synthesize when missing).
+        model_lines = []
+        for ln in parsed.get("analysis_lines") or []:
+            if isinstance(ln, dict) and ln.get("text"):
+                model_lines.append(str(ln["text"])[:2000])
+            elif isinstance(ln, str) and ln.strip():
+                model_lines.append(ln.strip()[:2000])
+        if not model_lines and reason:
+            model_lines = [s.strip() for s in re.split(r"(?<=[.;])\s+", reason) if s.strip()]
+        if not model_lines and not reason:
+            return None  # nothing usable from the model
+
+        def _first(key):
+            arr = offense.get(key) or []
+            return arr[0] if arr else None
+        obs = []
+        if _first("source_ips"): obs.append(f"Source IP: {_first('source_ips')}")
+        if _first("destination_ips"): obs.append(f"Destination IP: {_first('destination_ips')}")
+        if _first("usernames"): obs.append(f"Username: {_first('usernames')}")
+        obs.append(f"Offense ID: {offense.get('qradar_offense_id') or offense.get('id')}")
+
+        lines = [{"n": i, "text": t} for i, t in enumerate(model_lines, 1)]
+        lines.append({"n": len(lines) + 1,
+                      "text": "Observed artifacts in this offense — " + "; ".join(obs) + "."})
+
+        out = dict(rule_engine_mssp or {})
+        out["analysis_lines"] = lines
+        out["recommendations"] = recs or out.get("recommendations") or []
+        out["verdict"] = v
+        out["verdict_reason"] = reason or out.get("verdict_reason") or ""
+        if out.get("recommendations"):
+            out["recommendation_text"] = out["recommendations"][0]
+        out["generated_by"] = f"llm:{model_name}"
+        out["llm_total_seconds"] = round(time.time() - started, 1)
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LLM one-shot pipeline failure: %s — falling back.", e)
+        return None

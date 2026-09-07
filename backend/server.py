@@ -33,6 +33,7 @@ from sample_data import generate_sample_offenses
 import soc_engine
 import rag_store
 import kb_ingest
+import kb_template
 from qradar_client import QRadarClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -261,6 +262,10 @@ def _tenant_filter(user: dict, requested_client_id: Optional[str]) -> dict:
 def _assert_tenant_access(user: dict, client_id: Optional[str]) -> None:
     """Raise 403 unless the caller may operate on `client_id`."""
     if client_id is None:
+        return
+    if client_id == "ALL":
+        # Global "all tenants" KB scope is readable/writable by any authenticated user
+        # (write endpoints still enforce role via require_roles).
         return
     if _is_unrestricted(user):
         return
@@ -604,6 +609,12 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
         for m in extra:
             if m.get("text") not in seen:
                 kb_matches.append(m)
+                seen.add(m.get("text"))
+        # Global "ALL tenants" KB applies to every client
+        for m in rag_store.query("ALL", query_text, n_results=4):
+            if m.get("text") not in seen:
+                kb_matches.append(m)
+                seen.add(m.get("text"))
     except Exception as e:
         logger.warning("KB RAG failed: %s", e)
 
@@ -629,15 +640,11 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     settings_doc = await db.settings.find_one({"id": "global"}, {"_id": 0}) or {}
     llm_cfg = settings_doc.get("llm", {})
     ti_cfg = settings_doc.get("threat_intel", {})
+    analysis_mode = (llm_cfg.get("analysis_mode") or ("llm" if llm_cfg.get("enable_llm") else "kb")).lower()
+
+    # The MSSP report is the LLM target (generated in the background for LLM mode).
+    # We do NOT run a blocking narrative LLM call here — it would stall the request.
     narrative = None
-    if llm_cfg.get("enable_llm"):
-        iocs_pre = soc_engine.extract_iocs("\n".join([str(doc.get(k, "")) for k in ("description",)] +
-                                                     [str(e.get("payload", "")) for e in doc.get("events", [])]))
-        mitre_pre = soc_engine.map_mitre(doc.get("description", ""), doc.get("categories", []))
-        risk_pre = soc_engine.compute_risk_score(doc, mitre_pre, iocs_pre)
-        rec_pre, _ = soc_engine.recommend(risk_pre, mitre_pre, doc)
-        narrative = soc_engine.llm_narrative(doc, iocs_pre, mitre_pre, risk_pre, rec_pre,
-                                             llm_cfg.get("model_name", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"))
 
     # Load learned rule adjustments (Analyst Coach)
     adj_docs = await db.learned_adjustments.find({}, {"_id": 0}).to_list(500)
@@ -647,40 +654,43 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
                                           llm_narrative=narrative, ti_settings=ti_cfg,
                                           learned_adjustments=learned_adjustments)
 
-    # --- LLM-driven MSSP report (best-effort; falls back to rule engine on any failure) ---
-    if llm_cfg.get("enable_llm"):
-        try:
-            import llm_engine  # local import — heavy transformers stack, lazy load
-            rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
-            model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-3B-Instruct"
-            timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 180)
-            temperature = float(llm_cfg.get("temperature") or 0.3)
-            # Run the CPU-bound LLM chain off the event loop so the endpoint
-            # remains responsive during token generation.
-            loop = asyncio.get_event_loop()
-            llm_mssp = await loop.run_in_executor(
-                None,
-                llm_engine.build_llm_mssp_report,
-                doc, doc.get("events") or [], kb_matches, rule_engine_mssp,
-                model_name, temperature, timeout,
-            )
-            if llm_mssp:
-                analysis["mssp_report"] = llm_mssp
-                analysis["mssp_report_source"] = "llm"
-            else:
-                # Explicit fallback stamp so analysts/admins can see why.
-                reason = llm_engine.load_error() or "invalid_output_or_timeout"
-                analysis["mssp_report"] = analysis.get("mssp_report") or {}
-                analysis["mssp_report"]["generated_by"] = f"rule-engine (LLM fallback: {reason})"
-                analysis["mssp_report_source"] = "rule-engine-fallback"
-                logger.warning("LLM MSSP report unavailable — falling back for offense %s: %s",
-                               offense_id, reason)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("LLM MSSP pipeline errored for offense %s: %s — falling back.",
-                           offense_id, e)
-            analysis["mssp_report"] = analysis.get("mssp_report") or {}
-            analysis["mssp_report"]["generated_by"] = f"rule-engine (LLM fallback: {e})"
-            analysis["mssp_report_source"] = "rule-engine-fallback"
+    # --- KB-template / LLM MSSP report ---
+    # Match the offense's alert name against manually-added KB "historical data"
+    # (client-scoped + global "ALL tenants" entries).
+    manual_entries = await db.kb_entries.find(
+        {"entry_kind": "manual", "client_id": {"$in": [doc["client_id"], "ALL"]}},
+        {"_id": 0},
+    ).to_list(500)
+    matched_kb, match_score = kb_template.find_best_template(doc, manual_entries)
+    rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
+
+    # Base report: KB-template if a manual entry matches the alert name, else rule engine.
+    if matched_kb:
+        base_mssp = kb_template.build_kb_template_report(
+            doc, doc.get("events") or [], matched_kb, rule_engine_mssp, match_score)
+        base_source = "kb-template"
+    else:
+        base_mssp = dict(rule_engine_mssp)
+        base_mssp.setdefault("generated_by", "rule-engine")
+        base_source = "rule-engine"
+    analysis["mssp_report"] = base_mssp
+    analysis["mssp_report_source"] = base_source
+
+    # In LLM mode, Qwen refines the report in the BACKGROUND (CPU generation
+    # exceeds the ingress request window). The response returns immediately with
+    # the KB/rule report stamped llm_status="pending"; the UI polls for the update.
+    schedule_llm = analysis_mode == "llm"
+    if schedule_llm:
+        analysis["llm_status"] = "pending"
+        analysis["mssp_report"]["llm_status"] = "pending"
+        llm_kb = list(kb_matches)
+        if matched_kb:
+            llm_kb.insert(0, {
+                "text": kb_template.template_text(matched_kb),
+                "kb_type": "analyst_feedback",
+                "source": f"manual:{matched_kb.get('alert_name')}",
+                "similarity": 0.99,
+            })
 
     updates = {
         "ai_analysis": analysis,
@@ -696,8 +706,54 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     }
     await db.offenses.update_one({"id": offense_id}, {"$set": updates})
     await _audit(user["email"], "investigate", "offense", offense_id, {"risk": analysis["risk_score"]})
+    if schedule_llm:
+        model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-0.5B-Instruct"
+        timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 240)
+        temperature = float(llm_cfg.get("temperature") or 0.3)
+        asyncio.create_task(_run_llm_report_bg(
+            offense_id, doc, doc.get("events") or [], llm_kb, rule_engine_mssp,
+            model_name, temperature, max(300, timeout)))
     new_doc = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
     return new_doc
+
+
+async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: list,
+                             rule_engine_mssp: dict, model_name: str,
+                             temperature: float, timeout: int):
+    """Background: run the local Qwen one-shot and patch the offense's MSSP report."""
+    try:
+        import llm_engine  # heavy transformers stack — lazy
+        loop = asyncio.get_event_loop()
+        llm_mssp = await loop.run_in_executor(
+            None, llm_engine.build_llm_mssp_report_oneshot,
+            doc, events, llm_kb, rule_engine_mssp, model_name, temperature, timeout)
+        cur = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
+        if not cur:
+            return
+        ai = cur.get("ai_analysis") or {}
+        if llm_mssp:
+            llm_mssp["llm_status"] = "done"
+            ai["mssp_report"] = llm_mssp
+            ai["mssp_report_source"] = "llm"
+            ai["llm_status"] = "done"
+        else:
+            reason = llm_engine.load_error() or "invalid_output_or_timeout"
+            ai["llm_status"] = "failed"
+            if ai.get("mssp_report"):
+                ai["mssp_report"]["llm_status"] = "failed"
+                ai["mssp_report"]["llm_error"] = reason
+            logger.warning("Background LLM report unavailable for %s: %s", offense_id, reason)
+        await db.offenses.update_one({"id": offense_id},
+                                     {"$set": {"ai_analysis": ai, "last_updated": _now()}})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Background LLM report errored for %s: %s", offense_id, e)
+        cur = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
+        if cur:
+            ai = cur.get("ai_analysis") or {}
+            ai["llm_status"] = "failed"
+            if ai.get("mssp_report"):
+                ai["mssp_report"]["llm_status"] = "failed"
+            await db.offenses.update_one({"id": offense_id}, {"$set": {"ai_analysis": ai}})
 
 
 class OffenseCloseRequest(BaseModel):
@@ -1290,6 +1346,63 @@ async def list_kb(client_id: str, user: dict = Depends(get_current_user)):
     return await db.kb_entries.find({"client_id": client_id}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
 
 
+class KBManualRequest(BaseModel):
+    client_id: str  # a client id OR "ALL" for a global entry applicable to every tenant
+    alert_name: str
+    analysis: str
+    verdict: Optional[str] = None  # TP | FP | Suspicious
+    recommendations: List[str] = []
+    kb_type: str = "historical_incident"
+
+
+@api.post("/kb/manual")
+async def add_kb_manual(payload: KBManualRequest,
+                        user: dict = Depends(require_roles([UserRole.ADMIN, UserRole.SOC_MANAGER, UserRole.L2, UserRole.L3]))):
+    """Add historical analysis data by hand (Name + Analysis [+ Verdict, Recommendations]).
+    Stored structured (for the KB-template matcher) AND vector-indexed (for RAG retrieval).
+    Use client_id="ALL" to make the entry apply to every tenant."""
+    _assert_tenant_access(user, payload.client_id)
+    if not payload.alert_name.strip() or not payload.analysis.strip():
+        raise HTTPException(400, "alert_name and analysis are required")
+    recs = [r.strip() for r in (payload.recommendations or []) if r.strip()]
+    verdict = (payload.verdict or "").strip() or None
+    if verdict and verdict not in ("TP", "FP", "Suspicious"):
+        verdict = None
+    source = f"manual-{uuid.uuid4().hex[:12]}"
+    entry = KBEntry(
+        client_id=payload.client_id,
+        kb_type=payload.kb_type or "historical_incident",
+        filename=payload.alert_name.strip(),
+        content_summary=payload.analysis.strip()[:280],
+        document_count=0,
+        status="PROCESSING",
+        entry_kind="manual",
+        alert_name=payload.alert_name.strip(),
+        analysis=payload.analysis.strip(),
+        verdict=verdict,
+        recommendations=recs,
+        rag_source=source,
+        uploaded_by=user["email"],
+    )
+    await db.kb_entries.insert_one(entry.model_dump())
+    # Index into the vector store so it is also retrieved during LLM investigations.
+    chunks = _chunk_for_rag(kb_template.template_text(entry.model_dump()))
+    added = 0
+    try:
+        loop = asyncio.get_event_loop()
+        added = await loop.run_in_executor(
+            None, rag_store.add_documents, payload.client_id, entry.kb_type, source, chunks)
+    except Exception as e:
+        logger.warning("Manual KB vector index failed: %s", e)
+    await db.kb_entries.update_one(
+        {"id": entry.id},
+        {"$set": {"status": "READY", "document_count": added or len(chunks), "completed_at": _now()}},
+    )
+    await _audit(user["email"], "add_manual", "kb", entry.id,
+                 {"alert_name": entry.alert_name, "scope": payload.client_id})
+    return await db.kb_entries.find_one({"id": entry.id}, {"_id": 0})
+
+
 @api.post("/kb/upload")
 async def upload_kb(client_id: str = Form(...), kb_type: str = Form(...),
                     file: UploadFile = File(...),
@@ -1358,7 +1471,7 @@ async def delete_kb(entry_id: str,
     if not doc:
         raise HTTPException(404, "Not found")
     _assert_tenant_access(user, doc.get("client_id"))
-    rag_store.delete_for_client(doc["client_id"], doc["filename"])
+    rag_store.delete_for_client(doc["client_id"], doc.get("rag_source") or doc["filename"])
     await db.kb_entries.delete_one({"id": entry_id})
     await _audit(user["email"], "delete", "kb", entry_id)
     return {"deleted": True}

@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration 11 tested the new Local Qwen LLM + KB-template feature end-to-end. Backend pytest suite /app/backend/tests/test_iteration_11.py = 4/4 green: settings analysis_mode round-trips ('kb' <-> 'llm'), manual KB add with client_id='ALL' persists and is listed under All Tenants, KB-mode /investigate returns generated_by='kb-template:<alert name>' (artifact substitution confirmed), LLM-mode /investigate returns in 0.2s with llm_status=pending and background Qwen updates mssp_report.generated_by to 'llm:qwen/qwen2.5-0.5b-instruct' within ~20s (status=done). Frontend Playwright E2E was fully green: (1) Settings > Local LLM tab shows both llm-mode-kb and llm-mode-llm cards, selecting KB and clicking btn-save-settings persists across a hard reload (active card retains cyan-500 border). (2) Knowledge Base page (route is /knowledge-base) exposes kb-scope-select and switching to 'All Tenants (global)' reloads the entries. (3) kb-manual-form submits with alert_name='Multiple Login Failures for Single Username', analysis text containing template placeholders, verdict=Suspicious, recs; entry saves (toast + KB table update). (4) KB MODE end-to-end: opened offense #1004 (Multiple Login Failures for Single Username), clicked Re-Run AI Analysis (btn-investigate), MSSP report tab shows offense-mssp-report-source badge = 'KB Template · 100%' with verdict 'SUSPICIOUS', and analysis lines include 'This alert matches the knowledge-base template ... (name match 100%). Reusing the documented analysis and adapting it to this offense's artifacts.' + 'Observed artifacts in this offense — Source IP: 10.11.4.14; Destination IP: 172.17.51.7; Username: 4421; Time: 07 Sep 2026, 07:28:46; Offense ID: 1004.' Recommendations correctly rendered from the manual entry ('Enable MFA; Lock account after N failed logins.'). (5) LLM MODE end-to-end: switched analysis_mode to llm, re-investigated same offense — the response was immediate, data-testid llm-pending-banner appeared (cyan banner), and within one poll (~6s) the offense-mssp-report-source badge auto-updated to 'Local LLM' and a toast 'Local LLM finished refining the report' fired. (6) Reset analysis_mode back to KB at end of run as instructed. Local Qwen 0.5B inference works on CPU in this env.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global Layout header <select data-testid=client-selector>", "issues": ["Pre-existing (from iter_4): React hydration warning '<span> cannot be a child of <option>' from emergent visual-editor's build-time <span data-ve-dynamic> injection inside <option> labels. Cosmetic only, selector still functional."]},
+      {"screen": "Dashboard Ingest Trend chart", "issues": ["Pre-existing (from iter_4): Recharts 'width(-1) height(-1)' warnings from ResponsiveContainer without min-height. Cosmetic."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_11.py",
+    "/app/test_reports/pytest/iteration_11.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is still 1772 lines (grew a bit with the LLM/KB-manual endpoints) — the earlier recommendation to split into offense_routes / kb_routes / settings_routes still stands.",
+    "KnowledgeBasePage.jsx line 129: scopeOptions is rebuilt on every render — trivial, but consider useMemo. Not blocking.",
+    "OffenseDetailPage polling for ai_analysis.llm_status is fine; make sure the poll is cleared on unmount (spot-check suggests it is via useEffect cleanup)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration_11.py"],
+  "success_rate": {"backend": "100% (4/4)", "frontend": "100% (all critical selectors + full KB and LLM investigate flows)"},
+  "test_credentials": "admin@socpilot.ai / Admin@12345",
+  "seed_data_creation": "One manual KB entry added under client_id='ALL' with alert_name='Multiple Login Failures for Single Username' (analysis prefixed 'TEST_ITER11') via both API (test_kb_manual_add_all_tenants) and the UI form. This is used by the KB-template matcher for offense #1004.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Route for Knowledge Base is /knowledge-base (NOT /kb) — the KB feature is at Nav 'Knowledge Base'. In the KB scope select, the ALL option value is literally 'ALL' and the label is 'All Tenants (global)'. LLM final generated_by string is 'llm:qwen/qwen2.5-0.5b-instruct' and the badge in the UI renders as 'Local LLM'. In KB mode it renders as 'KB Template · <score>%' or 'Rule Engine'. The investigate POST returns fast (<1s) in LLM mode with llm_status=pending; Qwen finishes in ~15-20s on CPU here. Settings analysis_mode was left on 'kb' as required. Regression suite: pytest /app/backend/tests/test_iteration_11.py -n 0.",
+  "rca of the issue": "No bugs — feature is functioning per spec."
+}

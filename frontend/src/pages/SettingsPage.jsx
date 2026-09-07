@@ -110,6 +110,25 @@ export default function SettingsPage() {
           {tab === "llm" && (
             <div className="space-y-4" data-testid="llm-settings">
               <SectionHeader title="Local LLM (Hugging Face)" hint="Runs offline on CPU. Model downloads on first use." />
+              <div>
+                <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Analysis Engine</div>
+                <div className="grid grid-cols-2 gap-3" data-testid="llm-analysis-mode">
+                  {[
+                    { value: "kb", label: "KB Template", desc: "Deterministic. Matches the alert to a KB entry and reuses its analysis with this offense's artifacts. Instant." },
+                    { value: "llm", label: "Local LLM (Qwen)", desc: "Qwen generates the analysis from the KB reference. Real local inference on CPU — slower." },
+                  ].map((m) => {
+                    const active = (data.llm.analysis_mode || "kb") === m.value;
+                    return (
+                      <button key={m.value} type="button" data-testid={`llm-mode-${m.value}`}
+                        onClick={() => setData({ ...data, llm: { ...data.llm, analysis_mode: m.value } })}
+                        className={`text-left p-3 border transition-colors ${active ? "border-cyan-500 bg-cyan-500/10" : "border-[#1F1F1F] hover:border-cyan-500/50 bg-[#050505]"}`}>
+                        <div className={`text-sm font-mono font-bold ${active ? "text-cyan-300" : "text-neutral-200"}`}>{m.label}{active ? " ●" : ""}</div>
+                        <div className="text-[11px] text-neutral-500 mt-1 leading-relaxed">{m.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-4">
                 <SelectField label="Provider" val={data.llm.provider} on={(v) => setData({ ...data, llm: { ...data.llm, provider: v } })} testId="llm-provider"
                   options={[{ value: "local", label: "HuggingFace (local)" }, { value: "ollama", label: "Ollama endpoint" }, { value: "huggingface", label: "HF Inference API" }]} />
@@ -121,9 +140,8 @@ export default function SettingsPage() {
                 <TextField label="Max Tokens" val={data.llm.max_tokens} on={(v) => setData({ ...data, llm: { ...data.llm, max_tokens: parseInt(v || "0") } })} testId="llm-max" />
                 <TextField label="Temperature" val={data.llm.temperature} on={(v) => setData({ ...data, llm: { ...data.llm, temperature: parseFloat(v || "0") } })} testId="llm-temp" />
               </div>
-              <Toggle label="Enable local LLM narrative augmentation" checked={data.llm.enable_llm} onChange={(v) => setData({ ...data, llm: { ...data.llm, enable_llm: v } })} testId="llm-enable" />
               <div className="text-[11px] font-mono text-neutral-500 border-l-2 border-cyan-500 pl-3 py-1">
-                Rule-based SOC engine always runs. LLM augments the executive summary when enabled — first call may take several minutes to download the model.
+                The rule-based SOC engine always runs first. In <span className="text-cyan-400">KB Template</span> mode the report reuses a matching Knowledge Base entry's analysis (artifacts swapped for the current offense). In <span className="text-cyan-400">Local LLM</span> mode Qwen ({data.llm.model_name || "Qwen/Qwen2.5-0.5B-Instruct"}) generates it from that reference — the first call downloads the model and may take a few minutes.
               </div>
             </div>
           )}
