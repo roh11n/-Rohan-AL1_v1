@@ -67,7 +67,15 @@ sudo supervisorctl restart backend frontend      # or your process manager
 
 ## New / changed API endpoints
 - `POST /api/kb/manual`            — add historical KB entry (client_id can be "ALL")
+- `POST /api/kb/import-csv`         — bulk-import historical analyses from CSV (auto-detects columns)
 - `GET  /api/offenses/export`      — full offenses incl. events + payloads (?client_id=&ids=)
+- `POST /api/offenses/import`      — re-import offenses (with events/payloads) from exported JSON
 - `GET  /api/kb?client_id=ALL`     — global KB entries
 - `POST /api/offenses/{id}/investigate` — now returns fast with `ai_analysis.llm_status="pending"`
   in LLM mode; the report is refined in the background and the UI polls for it.
+
+## Also fixed
+- Events tab: each event row is now click-to-expand to show ALL fields + full payload; supports
+  QRadar field names (`sourceip`/`starttime`/`log_source`/`category_name`).
+- `_asset_criticality` now coerces `network` to string (real QRadar exports send it as a boolean,
+  which previously caused a 500 on investigate).

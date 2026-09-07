@@ -28,6 +28,25 @@ export default function KnowledgeBasePage() {
   // Manual "add historical data" form
   const [manual, setManual] = useState({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
   const [savingManual, setSavingManual] = useState(false);
+  const [importingCsv, setImportingCsv] = useState(false);
+
+  const importCsv = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    if (!scope) return toast.error("Select a KB scope first");
+    setImportingCsv(true);
+    try {
+      const fd = new FormData();
+      fd.append("client_id", scope);
+      fd.append("file", f);
+      const r = await api.post("/kb/import-csv", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      toast.success(`Imported ${r.data.imported} KB entr${r.data.imported === 1 ? "y" : "ies"}${r.data.skipped ? `, skipped ${r.data.skipped}` : ""}`);
+      load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "CSV import failed");
+    } finally { setImportingCsv(false); }
+  };
 
   // Keep scope in sync when the global active client first resolves.
   useEffect(() => { if (!scope && activeClientId) setScope(activeClientId); /* eslint-disable-next-line */ }, [activeClientId]);
@@ -187,10 +206,18 @@ export default function KnowledgeBasePage() {
             placeholder={"Confirm activity with {username}\nTune the detection rule if benign"}
             className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
         </div>
-        <button type="submit" disabled={savingManual} data-testid="kb-manual-submit"
-          className="bg-cyan-400 hover:bg-cyan-300 text-black px-4 py-2 text-xs font-mono uppercase tracking-widest font-bold inline-flex items-center gap-2 disabled:opacity-50">
-          <PlusCircle className="w-3.5 h-3.5" />{savingManual ? "Saving..." : "Add to Knowledge Base"}
-        </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button type="submit" disabled={savingManual} data-testid="kb-manual-submit"
+            className="bg-cyan-400 hover:bg-cyan-300 text-black px-4 py-2 text-xs font-mono uppercase tracking-widest font-bold inline-flex items-center gap-2 disabled:opacity-50">
+            <PlusCircle className="w-3.5 h-3.5" />{savingManual ? "Saving..." : "Add to Knowledge Base"}
+          </button>
+          <input type="file" accept=".csv,text/csv" style={{ display: "none" }} id="kb-csv-input" data-testid="kb-csv-input" onChange={importCsv} />
+          <button type="button" onClick={() => document.getElementById("kb-csv-input")?.click()} disabled={importingCsv} data-testid="kb-csv-import-btn"
+            className="border border-[#1F1F1F] hover:border-cyan-500 hover:text-cyan-400 px-4 py-2 text-xs font-mono uppercase tracking-widest text-neutral-300 inline-flex items-center gap-2 disabled:opacity-50">
+            <Upload className="w-3.5 h-3.5" />{importingCsv ? "Importing..." : "Import CSV"}
+          </button>
+          <span className="text-[10px] font-mono text-neutral-600">CSV columns auto-detected: alert/rule/name, analysis/description, verdict, recommendations</span>
+        </div>
       </form>
 
       {/* Search preview - available to any authenticated analyst or admin */}

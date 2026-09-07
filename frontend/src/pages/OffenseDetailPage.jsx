@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { SeverityChip, StatusChip } from "@/components/SeverityChip";
@@ -278,13 +278,22 @@ const TimelineTab = ({ timeline }) => (
   </div>
 );
 
+const EVENT_HIDDEN_KEYS = new Set(["payload", "payload_raw", "decoded_payload"]);
+
 const EventsTab = ({ events, highlight }) => {
   const hv = highlight?.value?.toLowerCase() || "";
+  const [open, setOpen] = useState(null);
   const matches = (e) => {
     if (!hv) return false;
-    const blob = JSON.stringify(e).toLowerCase();
-    return blob.includes(hv);
+    return JSON.stringify(e).toLowerCase().includes(hv);
   };
+  const evtTime = (e) => {
+    const t = e.event_time || e.starttime || e.devicetime || e.endtime;
+    if (!t) return "—";
+    const d = typeof t === "number" ? new Date(t) : new Date(t);
+    return isNaN(d.getTime()) ? String(t) : d.toLocaleString();
+  };
+  const val = (e, ...keys) => { for (const k of keys) if (e[k] !== undefined && e[k] !== null && e[k] !== "") return e[k]; return "—"; };
   return (
     <div className="tactical-panel overflow-hidden" data-testid="events-tab">
       {highlight && (
@@ -292,9 +301,13 @@ const EventsTab = ({ events, highlight }) => {
           // JUMPED FROM MSSP REPORT · matching '{highlight.label}: {highlight.value}'
         </div>
       )}
+      <div className="px-3 py-2 text-[10px] font-mono uppercase tracking-widest text-neutral-500 border-b border-[color:var(--border-default)]">
+        // {events.length} EVENT(S) · click a row to open full details
+      </div>
       <table className="w-full text-xs">
         <thead className="text-[10px] font-mono uppercase text-[color:var(--text-secondary)] tracking-widest border-b border-[color:var(--border-default)]">
           <tr>
+            <th className="text-left px-3 py-2 w-6"></th>
             <th className="text-left px-3 py-2">Event</th>
             <th className="text-left px-3 py-2">Source IP</th>
             <th className="text-left px-3 py-2">Dest IP</th>
@@ -307,19 +320,46 @@ const EventsTab = ({ events, highlight }) => {
         <tbody className="font-mono">
           {events.map((e, i) => {
             const isMatch = matches(e);
+            const isOpen = open === i;
             return (
-              <tr key={i} className={`border-b border-[#0F0F0F] ${isMatch ? "bg-cyan-500/10 border-cyan-500" : "hover:bg-[color:var(--bg-hover)]"}`} data-testid={`event-row-${i}`}>
-                <td className="px-3 py-2 text-[color:var(--text-primary)]">{isMatch && <span className="text-cyan-400 mr-1">►</span>}{e.event_name || e.category || "Event"}</td>
-                <td className="px-3 py-2 text-amber-400">{e.sourceip || "—"}</td>
-                <td className="px-3 py-2 text-[color:var(--text-secondary)]">{e.destinationip || "—"}</td>
-                <td className="px-3 py-2 text-cyan-400">{e.username || "—"}</td>
-                <td className="px-3 py-2 text-[color:var(--text-secondary)]">{e.log_source || "—"}</td>
-                <td className="px-3 py-2 text-[color:var(--text-secondary)]">{e.category || "—"}</td>
-                <td className="px-3 py-2 text-[color:var(--text-secondary)]">{e.event_time ? new Date(e.event_time).toLocaleTimeString() : "—"}</td>
-              </tr>
+              <Fragment key={i}>
+                <tr onClick={() => setOpen(isOpen ? null : i)}
+                    className={`border-b border-[#0F0F0F] cursor-pointer ${isMatch ? "bg-cyan-500/10 border-cyan-500" : "hover:bg-[color:var(--bg-hover)]"}`}
+                    data-testid={`event-row-${i}`}>
+                  <td className="px-3 py-2 text-cyan-400 select-none">{isOpen ? "▾" : "▸"}</td>
+                  <td className="px-3 py-2 text-[color:var(--text-primary)]">{isMatch && <span className="text-cyan-400 mr-1">►</span>}{val(e, "event_name", "category_name", "category")}</td>
+                  <td className="px-3 py-2 text-amber-400">{val(e, "sourceip", "source_ip")}</td>
+                  <td className="px-3 py-2 text-[color:var(--text-secondary)]">{val(e, "destinationip", "destination_ip")}</td>
+                  <td className="px-3 py-2 text-cyan-400">{val(e, "username", "user")}</td>
+                  <td className="px-3 py-2 text-[color:var(--text-secondary)]">{val(e, "log_source", "logsource")}</td>
+                  <td className="px-3 py-2 text-[color:var(--text-secondary)]">{val(e, "category_name", "category")}</td>
+                  <td className="px-3 py-2 text-[color:var(--text-secondary)] whitespace-nowrap">{evtTime(e)}</td>
+                </tr>
+                {isOpen && (
+                  <tr key={`${i}-d`} className="border-b border-[#1F1F1F] bg-[#050505]" data-testid={`event-detail-${i}`}>
+                    <td></td>
+                    <td colSpan={7} className="px-3 py-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1 mb-3">
+                        {Object.entries(e).filter(([k]) => !EVENT_HIDDEN_KEYS.has(k)).map(([k, v]) => (
+                          <div key={k} className="grid grid-cols-[160px_1fr] gap-2 text-[11px] border-b border-[#0F0F0F] py-1">
+                            <span className="text-neutral-500 uppercase tracking-wide break-all">{k}</span>
+                            <span className="text-neutral-200 break-all">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {(e.decoded_payload || e.payload) && (
+                        <div>
+                          <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-500 mb-1">// PAYLOAD</div>
+                          <PayloadViewer text={e.decoded_payload || e.payload} testId={`event-payload-${i}`} />
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             );
           })}
-          {events.length === 0 && <tr><td colSpan={7} className="px-3 py-10 text-center text-[color:var(--text-secondary)]">No events attached.</td></tr>}
+          {events.length === 0 && <tr><td colSpan={8} className="px-3 py-10 text-center text-[color:var(--text-secondary)]">No events attached.</td></tr>}
         </tbody>
       </table>
     </div>

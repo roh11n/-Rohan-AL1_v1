@@ -2,6 +2,7 @@
 import os
 import asyncio
 import logging
+import re
 import secrets
 import string
 import uuid
@@ -596,6 +597,47 @@ async def export_offenses(client_id: Optional[str] = None, ids: Optional[str] = 
         "count": len(docs),
         "offenses": docs,
     }
+
+
+class OffenseImportRequest(BaseModel):
+    client_id: Optional[str] = None   # target client; falls back to each offense's own client_id
+    data: dict                        # parsed JSON: {"offenses":[...]} OR a single offense object
+
+
+@api.post("/offenses/import")
+async def import_offenses(payload: OffenseImportRequest,
+                          user: dict = Depends(require_roles([UserRole.ADMIN, UserRole.SOC_MANAGER, UserRole.L2, UserRole.L3]))):
+    """Import offenses (with events + payloads) from a previously-exported JSON."""
+    raw = payload.data or {}
+    if isinstance(raw, dict) and isinstance(raw.get("offenses"), list):
+        offs = raw["offenses"]
+    elif isinstance(raw, list):
+        offs = raw
+    else:
+        offs = [raw]
+    if payload.client_id:
+        _assert_tenant_access(user, payload.client_id)
+    imported, ids = 0, []
+    for o in offs:
+        if not isinstance(o, dict) or not o.get("description"):
+            continue
+        cid = payload.client_id or o.get("client_id")
+        if not cid:
+            raise HTTPException(400, "No client_id found in file; select a target client on import.")
+        _assert_tenant_access(user, cid)
+        if not await db.clients.find_one({"id": cid}):
+            raise HTTPException(400, f"Target client not found. Pick an existing client to import into.")
+        doc = {k: v for k, v in o.items() if k != "_id"}
+        doc["id"] = str(uuid.uuid4())
+        doc["client_id"] = cid
+        doc.setdefault("status", "OPEN")
+        doc["imported_at"] = _now()
+        doc["imported_by"] = user["email"]
+        await db.offenses.insert_one(doc)
+        imported += 1
+        ids.append(doc["id"])
+    await _audit(user["email"], "import", "offense", None, {"imported": imported})
+    return {"imported": imported, "ids": ids}
 
 
 @api.get("/offenses/{offense_id}")
@@ -1420,6 +1462,58 @@ async def add_kb_manual(payload: KBManualRequest,
     await _audit(user["email"], "add_manual", "kb", entry.id,
                  {"alert_name": entry.alert_name, "scope": payload.client_id})
     return await db.kb_entries.find_one({"id": entry.id}, {"_id": 0})
+
+
+@api.post("/kb/import-csv")
+async def import_kb_csv(client_id: str = Form(...), file: UploadFile = File(...),
+                        user: dict = Depends(require_roles([UserRole.ADMIN, UserRole.SOC_MANAGER, UserRole.L2, UserRole.L3]))):
+    """Bulk-import historical KB analyses from a CSV. Columns are auto-detected:
+    alert/rule/name/title/use_case -> Alert Name; analysis/description/summary/resolution -> Analysis;
+    verdict/disposition/classification -> Verdict; recommendation(s)/action/remediation -> Recommendations.
+    Use client_id='ALL' for a global entry applicable to every tenant."""
+    _assert_tenant_access(user, client_id)
+    import csv as _csv, io as _io
+    text = (await file.read()).decode("utf-8-sig", errors="ignore")
+    reader = _csv.DictReader(_io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(400, "CSV has no header row")
+
+    def g(row, *names):
+        for n in names:
+            if row.get(n):
+                return row[n]
+        return ""
+
+    imported, skipped = 0, 0
+    loop = asyncio.get_event_loop()
+    for raw in reader:
+        row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items() if k}
+        alert = g(row, "alert_name", "alert", "rule_name", "rule", "name", "title", "use_case", "usecase", "offense_name", "offense")
+        analysis = g(row, "analysis", "description", "summary", "details", "resolution", "comment", "comments", "notes")
+        if not alert or not analysis:
+            skipped += 1
+            continue
+        vraw = g(row, "verdict", "disposition", "classification", "conclusion").upper()
+        verdict = ("TP" if ("TRUE" in vraw or vraw == "TP") else
+                   "FP" if ("FALSE" in vraw or vraw == "FP") else
+                   "Suspicious" if "SUSP" in vraw else None)
+        recs_raw = g(row, "recommendations", "recommendation", "action", "actions", "remediation")
+        recs = [x.strip() for x in re.split(r"[\n;|]+", recs_raw) if x.strip()]
+        source = f"csv-{uuid.uuid4().hex[:12]}"
+        entry = KBEntry(client_id=client_id, kb_type="historical_incident", filename=alert,
+                        content_summary=analysis[:280], document_count=0, status="READY",
+                        entry_kind="manual", alert_name=alert, analysis=analysis, verdict=verdict,
+                        recommendations=recs, rag_source=source, uploaded_by=user["email"],
+                        completed_at=_now())
+        await db.kb_entries.insert_one(entry.model_dump())
+        chunks = _chunk_for_rag(kb_template.template_text(entry.model_dump()))
+        try:
+            await loop.run_in_executor(None, rag_store.add_documents, client_id, entry.kb_type, source, chunks)
+        except Exception as e:
+            logger.warning("CSV KB vector index failed: %s", e)
+        imported += 1
+    await _audit(user["email"], "import_csv", "kb", None, {"imported": imported, "skipped": skipped, "client_id": client_id})
+    return {"imported": imported, "skipped": skipped, "detected_columns": reader.fieldnames}
 
 
 @api.post("/kb/upload")

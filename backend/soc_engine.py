@@ -411,7 +411,7 @@ def _network_analysis(iocs: dict) -> dict:
 
 
 def _asset_criticality(off: dict) -> str:
-    net = (off.get("network") or "").lower()
+    net = str(off.get("network") or "").lower()
     if any(x in net for x in ("prod", "db", "file", "domain")):
         return "HIGH"
     if "dmz" in net:

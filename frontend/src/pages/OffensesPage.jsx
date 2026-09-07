@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { useClients } from "@/lib/clients";
 import { SeverityChip, StatusChip } from "@/components/SeverityChip";
-import { Search, RefreshCw, X as XIcon, Download } from "lucide-react";
+import { Search, RefreshCw, X as XIcon, Download, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 const STATUS_OPTIONS = ["OPEN", "INVESTIGATING", "PENDING_APPROVAL", "ESCALATED", "RESOLVED", "CLOSED"];
@@ -21,6 +21,24 @@ export default function OffensesPage() {
   const [closeModal, setCloseModal] = useState(null); // { offenseIds: string[], bulk: boolean }
   const [bulkStatus, setBulkStatus] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  const importOffenses = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    if (!activeClientId) return toast.error("Select a client to import into");
+    setImporting(true);
+    try {
+      const text = await f.text();
+      const data = JSON.parse(text);
+      const r = await api.post("/offenses/import", { client_id: activeClientId, data });
+      toast.success(`Imported ${r.data.imported} offense(s)`);
+      load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || (err instanceof SyntaxError ? "Invalid JSON file" : "Import failed"));
+    } finally { setImporting(false); }
+  };
 
   const exportOffenses = async () => {
     if (!activeClientId) return toast.error("Select a client first");
@@ -127,6 +145,16 @@ export default function OffensesPage() {
           <h1 className="font-display text-3xl mt-1">Offenses</h1>
         </div>
         <div className="flex items-center gap-2">
+          <input type="file" accept="application/json,.json" style={{ display: "none" }} id="offense-import-input" data-testid="offense-import-input"
+            onChange={importOffenses} />
+          <button
+            onClick={() => document.getElementById("offense-import-input")?.click()}
+            disabled={importing}
+            data-testid="btn-import-offenses"
+            className="border border-[#1F1F1F] hover:border-cyan-500 hover:text-cyan-400 px-3 py-1.5 text-[11px] font-mono uppercase tracking-widest text-neutral-300 inline-flex items-center gap-2"
+          >
+            <Upload className="w-3 h-3" /> {importing ? "Importing..." : "Import JSON"}
+          </button>
           <button
             onClick={exportOffenses}
             disabled={exporting}
