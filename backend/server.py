@@ -685,8 +685,9 @@ def _is_public_ip(ip) -> bool:
         str(ip))
 
 
-def _pick_external_ip(base_mssp: dict, offense: dict):
-    cands = [(base_mssp or {}).get("destination_ip"), (base_mssp or {}).get("source_ip")]
+def _pick_external_ip(base_mssp: dict, offense: dict, extra_ips=None):
+    cands = list(extra_ips or [])
+    cands += [(base_mssp or {}).get("destination_ip"), (base_mssp or {}).get("source_ip")]
     cands += list(offense.get("source_ips") or []) + list(offense.get("destination_ips") or [])
     for ip in cands:
         if _is_public_ip(ip):
@@ -694,14 +695,15 @@ def _pick_external_ip(base_mssp: dict, offense: dict):
     return None
 
 
-async def _vt_ioc_enrichment(offense: dict, base_mssp: dict, ti_cfg: dict) -> dict | None:
-    """Live VirusTotal enrichment for the offense's external IP. Returns a structured
-    IOC-Enrichment block (used by both KB-template and LLM modes) or None."""
+async def _vt_ioc_enrichment(offense: dict, base_mssp: dict, ti_cfg: dict,
+                             extra_ips=None) -> dict | None:
+    """Live VirusTotal enrichment for the offense's external IP (from report fields OR
+    the extracted IOCs). Returns a structured IOC-Enrichment block or None."""
     if not ti_cfg or not ti_cfg.get("virustotal_enabled"):
         return None
     if not (ti_cfg.get("virustotal_api_keys") or ti_cfg.get("virustotal_api_key")):
         return None
-    ip = _pick_external_ip(base_mssp, offense)
+    ip = _pick_external_ip(base_mssp, offense, extra_ips)
     if not ip:
         return None
     from threat_intel import parse_vt_keys, vt_ip
@@ -817,8 +819,10 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     base_mssp.setdefault("generated_by", "rule-engine")
     base_source = "rule-engine"
 
-    # Live VirusTotal IOC enrichment (any external IP) — used by both KB and LLM modes.
-    vt_ioc = await _vt_ioc_enrichment(doc, base_mssp, ti_cfg)
+    # Live VirusTotal IOC enrichment (external IP from report fields OR extracted IOCs).
+    _ioc_ips = ((analysis.get("iocs") or {}).get("ipv4_external")
+                or (analysis.get("iocs") or {}).get("ipv4") or [])
+    vt_ioc = await _vt_ioc_enrichment(doc, base_mssp, ti_cfg, _ioc_ips)
 
     if matched_kb:
         analysis["mssp_report"] = kb_template.build_kb_template_report(
@@ -838,6 +842,7 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
         if vt_ioc:
             analysis["mssp_report"]["ioc_enrichment"] = vt_ioc
         llm_kb = list(kb_matches)
+        kb_ref = None
         if matched_kb:
             llm_kb.insert(0, {
                 "text": kb_template.template_text(matched_kb),
@@ -845,6 +850,12 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
                 "source": f"manual:{matched_kb.get('alert_name')}",
                 "similarity": 0.99,
             })
+            kb_ref = {
+                "alert_name": matched_kb.get("alert_name"),
+                "analysis": matched_kb.get("analysis"),
+                "impact": matched_kb.get("impact"),
+                "recommendations": matched_kb.get("recommendations") or [],
+            }
 
     updates = {
         "ai_analysis": analysis,
@@ -871,7 +882,7 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
         llm_base.pop("llm_status", None)
         asyncio.create_task(_run_llm_report_bg(
             offense_id, doc, doc.get("events") or [], llm_kb, llm_base,
-            model_name, temperature, max(300, timeout), vt_ioc))
+            model_name, temperature, max(300, timeout), vt_ioc, kb_ref))
     new_doc = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
     return new_doc
 
@@ -879,7 +890,8 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
 async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: list,
                              rule_engine_mssp: dict, model_name: str,
                              temperature: float, timeout: int,
-                             ioc_enrichment: dict | None = None):
+                             ioc_enrichment: dict | None = None,
+                             kb_ref: dict | None = None):
     """Background: run the local Qwen one-shot and patch the offense's MSSP report."""
     try:
         import llm_engine  # heavy transformers stack — lazy
@@ -887,7 +899,7 @@ async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: l
         llm_mssp = await loop.run_in_executor(
             None, llm_engine.build_llm_mssp_report_oneshot,
             doc, events, llm_kb, rule_engine_mssp, model_name, temperature, timeout,
-            ioc_enrichment)
+            ioc_enrichment, kb_ref)
         cur = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
         if not cur:
             return

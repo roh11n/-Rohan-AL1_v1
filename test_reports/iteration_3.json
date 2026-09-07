@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 12 verification of payload field coverage + KB adaptation + review-logs + no-code-fragments requirements for the ACME 'Suspicious PowerShell Encoded Command Execution' offense (5dd6f7e7). All 3 backend pytest cases pass (test_iteration_12.py, 46.6s). Frontend UI on /offenses/5dd6f7e7 → mssp report tab renders the expected report end-to-end: Local LLM badge + Verdict TP badge in header; payload fields grid shows Process=powershell.exe, Parent Process=outlook.exe, Command Line='powershell -nop -w hidden -enc SQBFAFgAKABOAGUA...'; Log source='Sysmon @ 10.10.34.12' (not Custom Rule Engine); Analysis has 3 technical bullets clearly adapted from the KB (mentions Base64/-enc/EncodedCommand/obfuscated); Impact bullet is on-topic; Recommendations list is KB-adapted with 'Review the Sysmon logs and correlate ...' pointer as final bullet; Verdict TP with reason shown at bottom. Section order Analysis → Impact → Recommendations → Verdict is correct. Recommendations text scanned with regex (^\\s*\\$)|(::)|FromBase64|System\\.[A-Z]|powershell\\s+-\\w|-enc\\s → NO code fragments matched. KB entries confirmed present via /api/kb.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/offenses/{id}/investigate (LLM)", "issue": "Recommendation bullet index 5 leaks the bare LLM section marker 'VARIABLES:' (a raw section header from the model output). _sanitize_bullets in llm_engine.py should drop bullets that are just an all-caps label followed by ':' with no content."},
+      {"endpoint": "GET /api/offenses/{id} (ai_analysis.mssp_report)", "issue": "For this offense threat_intel/ioc_enrichment is null (no external IP in payload) yet verdict_reason still says 'Threat Intelligence confirmed 1 malicious indicator(s) linked to this offense.' — misleading wording when there is no ioc_enrichment payload."},
+      {"endpoint": "ai_analysis.executive_summary", "issue": "Exec summary claims '1 external IP(s) (45.155.204.199)' but offense.external_ips=None and events have no source/destination_ip — inconsistent narrative vs stored fields."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "MsspReport.jsx recommendations list", "issue": "Renders leaked LLM marker 'VARIABLES:' as recommendation #5 (visible as '5) VARIABLES:' in UI)", "selector": "[data-testid='offense-mssp-report-recommendations']", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Offense Detail header (carry-over from iter 1/2)", "issues": ["Risk score SVG donut overlaps the 'Create Ticket' button on 1920px viewport"]},
+      {"screen": "Layout tenant selector (carry-over from iter 1/2)", "issues": ["Hydration error still present: <span> inside <option> in Layout.jsx line 122 — floods console on every route change"]}
+    ]
+  },
+  "critical_code_review_comments": [
+    "llm_engine.py _sanitize_bullets: missing a rule to drop bullets that consist solely of an all-caps or Title-Case label ending with ':' (e.g. 'VARIABLES:', 'NOTES:', 'CONTEXT:') — these are LLM section markers, not analyst-usable content. Add regex like ^\\s*[A-Z][A-Z0-9_ ]{2,}:\\s*$ to filter list.",
+    "server.py investigate: when kb_ref is applied and ioc_enrichment ends up null, avoid emitting verdict_reason strings that assert 'Threat Intelligence confirmed N malicious indicator(s)'. Gate that verdict_reason on presence of ioc_enrichment lines to prevent misleading UI.",
+    "Layout.jsx line 122: still emits <span> child of <option> — React hydration error. Wrap value directly in text node instead of a span."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_12.py",
+    "/app/test_reports/pytest/iter12.xml"
+  ],
+  "action_items": [
+    "Fix _sanitize_bullets to drop bare all-caps LLM section markers (e.g. 'VARIABLES:') so they never appear as a recommendation bullet.",
+    "Gate verdict_reason wording on ioc_enrichment presence to avoid the misleading 'Threat Intelligence confirmed N malicious indicator(s)' when there is no IOC enrichment.",
+    "Optional: Reconcile executive_summary external-IP narrative with actual offense.external_ips list.",
+    "Optional carry-over: fix <span>-in-<option> hydration warning in Layout.jsx and risk-donut overlap on Create Ticket button."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration_12.py (new pytest regression, 3/3 pass)"],
+  "success_rate": {"backend": "100% (3/3 pytest)", "frontend": "~92% (10 of 11 requirements met — 'VARIABLES:' leak in recommendations bullet list)"},
+  "test_credentials": "admin@socpilot.ai / Admin@123",
+  "seed_data_creation": "None — reused already-imported KB entries and existing ACME offense 5dd6f7e7 (Suspicious PowerShell Encoded Command Execution). Verdict was TP, KB adaptation active.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Target offense: 5dd6f7e7-b005-43dd-87ca-53f23fa41422 (ACME, PowerShell Encoded). Report component testId is 'offense-mssp-report'; sub-testids include offense-mssp-report-impact, offense-mssp-report-recommendations, offense-mssp-report-verdict-reason. IOC section testid 'offense-mssp-report-ioc-enrichment' is intentionally absent when payload has no external IP (this offense's src/dst are internal 10.10.34.12). The one open bug is 'VARIABLES:' leaking as recommendation bullet #5 — after fix, re-run test_iteration_12.py and additionally assert `not any(re.fullmatch(r'[A-Z]{2,}:', t.strip()) for t in rec_texts)`.",
+  "rca of the issue": "LLM raw output for this KB-adapted PowerShell offense includes a section header line 'VARIABLES:' between the numbered recommendation bullets and the appended 'Review the Sysmon logs...' pointer. The current _sanitize_bullets in llm_engine.py preserves it because it passes basic length checks and isn't caught by the code-fragment regex (no $, ::, System., -enc). Fix: add a rule to drop bullets matching `^\\s*[A-Z][A-Z0-9 _]{1,}:\\s*$` (bare section marker) inside _sanitize_bullets, and re-invoke it after _ensure_review_logs to keep ordering clean."
+}

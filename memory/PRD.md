@@ -51,3 +51,10 @@ Fixed 4 user-reported flaws so reports read like a real MSSP L1 analyst:
 Verified: testing agent iteration_2.json 100% frontend + 2/2 backend pytest. Example: ACME CTI-outbound offense -> source=llm, real log source (Zscaler NSS), clean technical bullets, VT enrichment (Cloudflare/US/3 malicious), verdict TP.
 
 Known non-blocking (pre-existing, not in this bug report): risk-donut overlaps Create Ticket button; <span>-in-<option> hydration warning.
+
+## Update 2026-06 (b) — Payload coverage, deeper KB learning, review-logs
+- Payload Field Coverage: soc_engine._structured_event_fields surfaces Process, Parent Process, Command Line, File Hash/SHA256/MD5, File Name/Path, Host, Registry, URL directly from event keys; broadened payload regexes. Verified: PowerShell offense shows Process=powershell.exe, Parent=outlook.exe, full -enc command line.
+- Stronger KB learning: matched use-case's ITSM_Analysis/Impact/Recommendations are passed to the LLM as an authoritative "KB write-up" (llm_engine kb_ref) with adapt-to-this-offense instructions; output now clearly reflects/adapts KB content.
+- Recommendations always include a "Review the <log source> logs and correlate ..." pointer (llm_engine._ensure_review_logs + kb_template).
+- Cleanups: _sanitize_bullets drops code/script fragments and bare section markers (e.g. VARIABLES:). IOC Enrichment now also enriches the external IP found in extracted IOCs (server passes analysis.iocs.ipv4_external), fixing null-IOC + misleading TI verdict wording.
+- Verified: testing agent iteration_3 -> fixes -> iteration_4 (4/4 backend pytest, 100% frontend). Report order Analysis -> Impact -> Recommendations -> IOC Enrichment -> Verdict.

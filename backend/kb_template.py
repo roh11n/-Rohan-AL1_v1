@@ -141,6 +141,11 @@ def build_kb_template_report(offense: dict, events: list[dict], kb_entry: dict,
     recs = [_fill(r, fm) for r in (kb_entry.get("recommendations") or []) if r]
     if len(recs) == 1:  # single paragraph -> split into bullets
         recs = _to_bullets(recs[0], fm) or recs
+    # Always include a "review the logs" investigation pointer.
+    ls = str(base.get("log_source") or "").split("@")[0].split("::")[0].strip() or "the relevant device"
+    if not any(re.search(r"(?i)review.{0,20}logs?|logs?.{0,20}review|correlate.{0,20}events?", r) for r in recs):
+        recs.append(f"Review the {ls} logs and correlate the surrounding events around the "
+                    f"alert time to confirm the scope, source and intent of the activity.")
     if recs:
         base["recommendations"] = recs
         base["recommendation_text"] = recs[0]

@@ -545,19 +545,28 @@ def _bullets(val) -> list[str]:
 
 
 def _sanitize_bullets(items) -> list[str]:
-    """Drop model artifacts (JSON/key=value/field echoes) and keep clean prose bullets."""
+    """Drop model artifacts (JSON/key=value/field echoes/code snippets) and keep clean prose."""
     out = []
     for b in items or []:
         s = str(b).strip().strip('"').strip()
         if not s or s in ("-", "*", "•"):
             continue
+        # Bare section markers the model sometimes emits (e.g. 'VARIABLES:', 'NOTES:').
+        if re.fullmatch(r"[A-Z][A-Z0-9 _/&-]{1,40}:?", s):
+            continue
+        # Code / script fragments the small model sometimes injects.
+        if re.match(r"^[$\\{}\[\]<>]", s):
+            continue
+        if re.search(r"::|=\s*\[|\];|FromBase64|GetString|System\.[A-Z]|\bEncoding\]", s):
+            continue
+        # Echoed structured data rather than prose.
         if re.match(r"^[\{\}\[\]]", s) or re.match(r"^[\w ]{1,30}=", s):
             continue
         if s.count("=") >= 2:
             continue
         head = s.split(":", 1)[0].strip().lower() if ":" in s else ""
         if head in ("event_name", "log_source", "username", "category", "payload", "src", "dst",
-                    "ip address", "cti feed", "variables used"):
+                    "ip address", "cti feed", "variables used", "example encoded command"):
             continue
         out.append(s[:2000])
     return out[:8]
@@ -620,13 +629,41 @@ def _parse_sections(text: str | None) -> dict | None:
             "verdict": verdict, "reason": reason}
 
 
+def _ensure_review_logs(recs: list[str], log_source: str | None) -> list[str]:
+    """Guarantee a 'review the logs' investigation pointer is present."""
+    recs = [r for r in (recs or []) if str(r).strip()]
+    if any(re.search(r"(?i)review.{0,20}logs?|logs?.{0,20}review|correlate.{0,20}events?", r) for r in recs):
+        return recs
+    ls = (log_source or "").split("@")[0].split("::")[0].strip() or "the relevant device"
+    recs.append(f"Review the {ls} logs and correlate the surrounding events around the alert "
+                f"time to confirm the scope, source and intent of the activity.")
+    return recs
+
+
+def _kb_writeup_block(kb_ref: dict | None) -> str:
+    """Authoritative analyst KB write-up (ITSM columns) for the SAME use case."""
+    if not kb_ref:
+        return ""
+    parts = [f"USE CASE: {kb_ref.get('alert_name') or ''}"]
+    if kb_ref.get("analysis"):
+        parts.append("KB_ANALYSIS: " + str(kb_ref["analysis"])[:1600])
+    if kb_ref.get("impact"):
+        parts.append("KB_IMPACT: " + str(kb_ref["impact"])[:1000])
+    if kb_ref.get("recommendations"):
+        recs = kb_ref["recommendations"]
+        recs = "; ".join(recs) if isinstance(recs, list) else str(recs)
+        parts.append("KB_RECOMMENDATIONS: " + recs[:1200])
+    return "\n".join(parts)
+
+
 def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
                                   kb_matches: list[dict],
                                   rule_engine_mssp: dict,
                                   model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
                                   temperature: float = 0.3,
                                   timeout_seconds: int = 240,
-                                  ioc_enrichment: dict | None = None) -> dict | None:
+                                  ioc_enrichment: dict | None = None,
+                                  kb_ref: dict | None = None) -> dict | None:
     """Local-LLM pass producing a structured, TECHNICAL MSSP L1 analysis grounded in
     THIS offense's fields, events and payloads. The knowledge-base reference (a prior
     analysis of the SAME use-case) is provided so the model learns the expected format,
@@ -635,32 +672,61 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
     None to fall back to the rule/KB report."""
     started = time.time()
     try:
-        sys_msg = (
-            "You are an experienced MSSP SOC L1 analyst. Write a concise, TECHNICAL analyst "
-            "report for ONE QRadar offense using its fields, events and payloads. A knowledge-base "
-            "reference for the SAME use case is provided for style and terminology only — analyze "
-            "THIS offense's real data.\n"
-            "RULES:\n"
-            "- Write short, plain-English technical bullet sentences. Do NOT output JSON, field "
-            "names, key=value pairs, or raw payload text.\n"
-            "- Do NOT compare to or mention any other/previous/historical/similar offenses.\n"
-            "- Ground every statement in the provided fields/payload (hosts, IPs, accounts, "
-            "processes, ports, actions, log source).\n"
-            "Respond EXACTLY in this layout and nothing else:\n"
-            "ANALYSIS:\n- <why the alert triggered / what is involved / behavior observed>\n"
-            "IMPACT:\n- <concrete technical impact in the environment>\n"
-            "RECOMMENDATIONS:\n- <technical remediation / containment / investigation step>\n"
-            "VERDICT: <TP or FP or Suspicious>\n"
-            "REASON: <one technical sentence>\n"
-            "Use 3-5 ANALYSIS bullets, 2-4 IMPACT bullets, 3-5 RECOMMENDATIONS bullets."
-        )
-        user_msg = (
-            "OFFENSE FIELDS:\n" + _fields_block(rule_engine_mssp, offense) + "\n\n"
-            "EVENTS (with payload):\n" + _events_block(events) + "\n\n"
-            "KNOWLEDGE-BASE REFERENCE (same use case — match its style/depth only, do not reuse its data):\n"
-            + _kb_reference_block(kb_matches) + "\n\n"
-            "Now write the report in the exact layout above."
-        )
+        kb_block = _kb_writeup_block(kb_ref)
+        if kb_block:
+            sys_msg = (
+                "You are an experienced MSSP SOC L1 analyst. You are given the analyst "
+                "KNOWLEDGE-BASE WRITE-UP (from prior ITSM tickets) for the SAME use case as this "
+                "offense, plus this offense's fields, events and payloads. READ the KB write-up, "
+                "understand its meaning and reasoning, then produce the report for THIS offense by "
+                "ADAPTING that KB knowledge to this offense's real artifacts (hosts, IPs, accounts, "
+                "processes, ports, actions, log source).\n"
+                "RULES:\n"
+                "- Reuse the KB write-up's technical reasoning and depth; do not contradict it.\n"
+                "- Write short, plain-English technical bullet sentences. No JSON, no field names, "
+                "no key=value pairs, no raw payload text.\n"
+                "- Do NOT mention other/previous/historical/similar offenses or the knowledge base itself.\n"
+                "- Ground every statement in this offense's data.\n"
+                "Respond EXACTLY in this layout and nothing else:\n"
+                "ANALYSIS:\n- <why the alert triggered / what is involved / behavior observed>\n"
+                "IMPACT:\n- <concrete technical impact in the environment>\n"
+                "RECOMMENDATIONS:\n- <technical remediation / containment / investigation step; include reviewing the relevant logs>\n"
+                "VERDICT: <TP or FP or Suspicious>\n"
+                "REASON: <one technical sentence>\n"
+                "Use 3-5 ANALYSIS bullets, 2-4 IMPACT bullets, 3-5 RECOMMENDATIONS bullets."
+            )
+            user_msg = (
+                "KNOWLEDGE-BASE WRITE-UP FOR THIS USE CASE (adapt this to the offense below):\n"
+                + kb_block + "\n\n"
+                "THIS OFFENSE — FIELDS:\n" + _fields_block(rule_engine_mssp, offense) + "\n\n"
+                "THIS OFFENSE — EVENTS (with payload):\n" + _events_block(events) + "\n\n"
+                "Now write the report in the exact layout above, adapting the KB write-up to this offense."
+            )
+        else:
+            sys_msg = (
+                "You are an experienced MSSP SOC L1 analyst. Write a concise, TECHNICAL analyst "
+                "report for ONE QRadar offense using its fields, events and payloads.\n"
+                "RULES:\n"
+                "- Write short, plain-English technical bullet sentences. Do NOT output JSON, field "
+                "names, key=value pairs, or raw payload text.\n"
+                "- Do NOT compare to or mention any other/previous/historical/similar offenses.\n"
+                "- Ground every statement in the provided fields/payload (hosts, IPs, accounts, "
+                "processes, ports, actions, log source).\n"
+                "Respond EXACTLY in this layout and nothing else:\n"
+                "ANALYSIS:\n- <why the alert triggered / what is involved / behavior observed>\n"
+                "IMPACT:\n- <concrete technical impact in the environment>\n"
+                "RECOMMENDATIONS:\n- <technical remediation / containment / investigation step; include reviewing the relevant logs>\n"
+                "VERDICT: <TP or FP or Suspicious>\n"
+                "REASON: <one technical sentence>\n"
+                "Use 3-5 ANALYSIS bullets, 2-4 IMPACT bullets, 3-5 RECOMMENDATIONS bullets."
+            )
+            user_msg = (
+                "OFFENSE FIELDS:\n" + _fields_block(rule_engine_mssp, offense) + "\n\n"
+                "EVENTS (with payload):\n" + _events_block(events) + "\n\n"
+                "KNOWLEDGE-BASE REFERENCE (same use case — match its style/depth only, do not reuse its data):\n"
+                + _kb_reference_block(kb_matches) + "\n\n"
+                "Now write the report in the exact layout above."
+            )
         parsed = None
         for temp in (temperature, 0.0):
             reply = _chat_with_timeout(
@@ -670,7 +736,7 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
                 max_new_tokens=420, temperature=temp, timeout_seconds=timeout_seconds,
             )
             parsed = _parse_sections(reply)
-            if isinstance(parsed, dict):
+            if isinstance(parsed, dict) and parsed.get("analysis"):
                 break
         # Base = the report we were handed (KB-template when a use-case matched, else
         # rule-engine). We overlay whatever the model produced and BACKFILL any section
@@ -679,7 +745,12 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
         out = dict(rule_engine_mssp or {})
         base_has_analysis = bool(out.get("analysis_lines"))
         if not isinstance(parsed, dict):
-            return out if base_has_analysis else None
+            if base_has_analysis:
+                out["recommendations"] = _ensure_review_logs(out.get("recommendations"), out.get("log_source"))
+                if out.get("recommendations"):
+                    out["recommendation_text"] = out["recommendations"][0]
+                return out
+            return None
 
         analysis = _sanitize_bullets(parsed.get("analysis"))
         impact = _sanitize_bullets(parsed.get("impact"))
@@ -695,6 +766,7 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
             out["impact_lines"] = impact
         if recs:
             out["recommendations"] = recs
+        out["recommendations"] = _ensure_review_logs(out.get("recommendations"), out.get("log_source"))
         if out.get("recommendations"):
             out["recommendation_text"] = out["recommendations"][0]
         if v in ("TP", "FP", "Suspicious"):

@@ -1,0 +1,28 @@
+{
+  "summary": "Iteration 13 retest of the two previously-failing issues on ACME offense 5dd6f7e7 (Suspicious PowerShell Encoded Command Execution) in LLM mode. Backend: test_iteration_12.py (3/3 pass in 34s) and new test_iteration_13.py (1/1 pass in 42s) verify no bare all-caps section markers (regex ^[A-Z][A-Z0-9 _/&-]{1,40}:?$) in recommendations, review-logs pointer present, and IOC enrichment populated with source_ip=45.155.204.199. Frontend UI on /offenses/5dd6f7e7 → 'mssp report' tab renders the full report end-to-end: Local LLM badge + Verdict SUSPICIOUS badge in header; payload fields grid shows Process=powershell.exe, Parent Process=outlook.exe, Command Line='powershell -nop -w hidden -enc SQBFAFgAKABOAGUA...'; Log source='Sysmon @ 10.10.34.12' (never CRE); Analysis has 3 technical bullets (no historical/similar-offense wording); Impact 5 bullets; Recommendations 6 bullets with 'Review the Sysmon logs and correlate ...' as final bullet and NO bare 'VARIABLES:'/'NOTES:' markers; IOC Enrichment section (offense-mssp-report-ioc-enrichment) renders with 'Source IP 45.155.204.199 was reviewed. The IP belongs to Cloud.ru. Geolocation: RU. Reputation score: 0 malicious / 0 suspicious.' plus VirusTotal link — TI-based verdict is now consistent; Verdict reason at bottom is grounded (references Base64-encoded command, not a stale TI claim). Section order in DOM (top-to-bottom, excluding the header verdict badge): Analysis → Impact → Recommendations → IOC Enrichment → Verdict Reason.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Offense Detail header (pre-existing carry-over, out of scope per request)", "issues": ["Risk score SVG donut overlaps 'Create Ticket' button on 1920px viewport"]},
+      {"screen": "Tenant selector (pre-existing carry-over, out of scope per request)", "issues": ["Hydration warning: <span> inside <option> in Layout.jsx"]}
+    ]
+  },
+  "critical_code_review_comments": [],
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_12.py",
+    "/app/backend/tests/test_iteration_13.py",
+    "/app/test_reports/pytest/iter12_retest.xml",
+    "/app/test_reports/pytest/iter13.xml"
+  ],
+  "action_items": [],
+  "updated_files": ["/app/backend/tests/test_iteration_13.py (new pytest regression, 1/1 pass)"],
+  "success_rate": {"backend": "100% (4/4 pytest)", "frontend": "100% (all iteration-3 requirements met)"},
+  "test_credentials": "admin@socpilot.ai / Admin@123",
+  "seed_data_creation": "None — reused existing ACME PowerShell offense 5dd6f7e7 and imported KB entries.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Both previously-failing issues are now fixed and verified via backend pytest + Playwright UI. Verdict on this run came back as SUSPICIOUS (previous run said TP) — both are within the allowed TP/FP/Suspicious set and the verdict_reason is now content-grounded (references Base64-encoded command) rather than the misleading 'Threat Intelligence confirmed N malicious indicator(s)' seen in iteration_3. Pre-existing cosmetic carry-overs (risk-donut overlap, <span>-in-<option> hydration warning) intentionally not flagged per review_request.",
+  "rca of the issue": "Iteration 3 rec-bullet #5 'VARIABLES:' leak was caused by _sanitize_bullets in llm_engine.py not filtering bare all-caps section markers — the added regex ^[A-Z][A-Z0-9 _/&-]{1,40}:?$ now drops them. The null IOC enrichment issue was caused by _pick_external_ip only looking at offense IP fields (both internal 10.10.34.12); server.py now passes analysis.iocs.ipv4_external to _vt_ioc_enrichment so the extracted external IP 45.155.204.199 is correctly enriched by VirusTotal."
+}

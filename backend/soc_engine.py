@@ -717,7 +717,7 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if payload_kv.get("content_type"): pkv_fields.append(("Content Type", payload_kv["content_type"]))
     for lbl, val in custom_fields:
         pkv_fields.append((lbl, val))
-    discovered = pkv_fields + _discover_extra_fields(events)
+    discovered = pkv_fields + _structured_event_fields(events) + _discover_extra_fields(events)
     _seen_lbl = set()
     discovered = [(l, v) for (l, v) in discovered if not (l in _seen_lbl or _seen_lbl.add(l))]
     for label, value in discovered:
@@ -884,6 +884,34 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
     return res
 
 
+def _structured_event_fields(events: list[dict]) -> list[tuple[str, str]]:
+    """Surface analyst-critical fields directly from structured event keys (Sysmon/EDR
+    style) so process, command line, file hash, host, etc. are never missed even when
+    they aren't in the free-text payload."""
+    label_map = [
+        ("process", "Process"), ("process_name", "Process"), ("image", "Process"),
+        ("parent_process", "Parent Process"), ("parent_image", "Parent Process"),
+        ("command_line", "Command Line"), ("commandline", "Command Line"),
+        ("process_command_line", "Command Line"),
+        ("file_hash", "File Hash"), ("sha256", "SHA256"), ("sha1", "SHA1"), ("md5", "MD5"),
+        ("file_name", "File Name"), ("filename", "File Name"), ("file_path", "File Path"),
+        ("host", "Host"), ("hostname", "Host"),
+        ("registry", "Registry"), ("url", "URL"), ("query", "Query"),
+    ]
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for key, label in label_map:
+        if label in seen:
+            continue
+        for e in events or []:
+            v = e.get(key) if isinstance(e, dict) else None
+            if v not in (None, "", "0", "0.0.0.0", "-"):
+                out.append((label, str(v)[:250]))
+                seen.add(label)
+                break
+    return out
+
+
 def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:
     """Scan event payloads and pull out additional analyst-useful fields.
     Returns [(label, value), ...] with de-duped values."""
@@ -907,11 +935,11 @@ def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:
         ("Response Code", r"Response\s*Code[:=]\s*(\d{3})"),
         ("ASN", r"ASN[:=]\s*([^\n\r]+?)(?:\s{2,}|City|Log Source|$)"),
         ("User Agent", r"User\s*Agent[:=]\s*([^\n\r]+?)(?:\s{2,}|Log Source|$)"),
-        ("Process", r"(?:ProgramName|Process)[:=]\s*([^\n\r,]+)"),
-        ("Parent Process", r"parent_process=(\S+)"),
-        ("Command Line", r"command_line=([^\n\r]+?)(?:\s{2,}|$)"),
-        ("File Hash", r"\b(?:hash|SHA256|SHA1|MD5)\s*[:=]\s*([a-fA-F0-9]{32,64})\b"),
-        ("File Name", r"\bfile\s*[:=]\s*([^\s,]+)"),
+        ("Process", r"(?:New\s*Process\s*Name|ProcessName|Image|ProgramName|Process(?:\s*Name)?)\s*[:=]\s*([^\n\r,;]+)"),
+        ("Parent Process", r"(?:ParentImage|ParentProcessName|parent_process)\s*[:=]\s*([^\n\r,;]+)"),
+        ("Command Line", r"(?:CommandLine|command_line|Command\s*Line|Process\s*Command\s*Line)\s*[:=]\s*([^\n\r]+?)(?:\s{2,}|$)"),
+        ("File Hash", r"\b(?:file[_ ]?hash|hashes?|SHA[- ]?256|SHA[- ]?1|MD5)\s*[:=]\s*([a-fA-F0-9]{32,64})\b"),
+        ("File Name", r"\b(?:file[_ ]?name|file)\s*[:=]\s*([^\s,]+)"),
         ("Destination Port", r"Destination\s*Port[:=]\s*(\d+)"),
         ("Source Port", r"Source\s*Port[:=]\s*(\d+)"),
         ("Protocol", r"\bProtocol[:=]\s*(TCP|UDP|ICMP|HTTPS?)\b"),
