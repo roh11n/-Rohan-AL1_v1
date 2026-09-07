@@ -1,0 +1,27 @@
+{
+  "summary": "Frontend-only E2E test of SOCPilot per request. All 8 requested flows verified working: admin login ('Enter Console'), dashboard widgets, offenses listing (12/tenant), offense detail + Investigate with pending->done LLM polling transition (badge switches to 'LOCAL LLM' with verdict 'SUSPICIOUS' after ~15s), Settings page loads (admin only, Local LLM tab present with Analysis Engine selector), Knowledge Base page loads with KB scope selector and manual add form (verdict, analysis, impact, recs, IOC enrichment, CSV import), L1 analyst login works and sees scoped 12 offenses with Settings/RBAC pages hidden as expected. Graceful fallback confirmed: KB/rule-engine MSSP report renders immediately with pending banner, then updates to LLM version.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Offense Detail header", "issues": ["Risk score gauge (SVG donut) overlaps 'Create Ticket' button in top-right on 1920px viewport - creates z-index/visual conflict"]},
+      {"screen": "Dashboard (during load)", "issues": ["Recharts warnings: 'width(-1) and height(-1) of chart should be greater than 0' - chart container initial layout race. Renders correctly after mount but pollutes console."]}
+    ]
+  },
+  "critical_code_review_comments": [
+    "Layout.jsx line 122 (tenant client selector <option>): React hydration error 'In HTML, <span> cannot be a child of <option>'. A wrapper span is being injected inside <option> elements which is invalid HTML and triggers hydration warnings on every navigation. Fix by rendering the client name as plain text inside <option>, not wrapped in span."
+  ],
+  "test_report_links": [],
+  "action_items": [
+    "Optional: Fix Layout.jsx <option> hydration warning (render text directly, no span wrapper).",
+    "Optional: Ensure Recharts ResponsiveContainer has explicit min height to avoid width/height(-1) warnings on initial render."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped per request)", "frontend": "100% (8/8 flows)"},
+  "test_credentials": "admin@socpilot.ai/Admin@123, analyst@socpilot.ai/Analyst@123",
+  "seed_data_creation": "None - relies on backend auto-seed (12 offenses x 3 clients).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All requested SOCPilot frontend flows verified working end-to-end. Local Qwen LLM inference completes in ~15-20s and MSSP report transitions from 'Rule Engine' badge (with green pending banner) to 'LOCAL LLM' badge with valid verdict. RBAC correctly hides Settings/Users/Clients/KB from L1 analyst. Only cosmetic issues: hydration warning from <span> in <option> in Layout.jsx and Recharts init size warnings."
+}

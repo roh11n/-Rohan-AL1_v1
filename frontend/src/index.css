@@ -1,0 +1,505 @@
+/* SOCPilot AI — ThreatGraph light theme (Deloitte green + cool gray, terminal-inspired) */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- ThreatGraph palette (defaults = light) ---------- */
+:root {
+    /* Surface ladder */
+    --tg-bg: #fafafa;
+    --tg-surface: #ffffff;
+    --tg-surface-2: #f4f4f2;
+    --tg-border: #d0d0ce;
+    --tg-border-strong: #bbbcbc;
+
+    /* Text ladder */
+    --tg-text: #0b0f14;
+    --tg-text-dim: #53565a;
+    --tg-text-muted: #75787b;
+    --tg-text-hint: #97999b;
+
+    /* Brand + data */
+    --tg-cyan: #046a38;
+    --tg-cyan-dim: #2c5234;
+    --tg-lime: #86bc25;
+    --tg-lime-dim: #43b02a;
+    --tg-indigo: #0076a8;
+    --tg-teal: #0097a9;
+    --tg-sky: #00a3e0;
+    --tg-blue-deep: #012169;
+    --tg-amber: #b8860b;
+    --tg-yellow: #c4d600;
+    --tg-red: #d92d20;
+
+    --tg-shadow-sm: 0 1px 2px rgba(11, 15, 20, 0.04), 0 0 0 1px rgba(11, 15, 20, 0.02);
+    --tg-shadow: 0 4px 14px rgba(11, 15, 20, 0.08), 0 0 0 1px rgba(11, 15, 20, 0.02);
+
+    /* Compat with previous variable names — keeps existing components working */
+    --bg-base: var(--tg-bg);
+    --bg-surface: var(--tg-surface);
+    --bg-surface-2: var(--tg-surface-2);
+    --bg-hover: var(--tg-surface-2);
+    --border-default: var(--tg-border);
+    --border-active: var(--tg-border-strong);
+    --text-primary: var(--tg-text);
+    --text-secondary: var(--tg-text-dim);
+    --text-muted: var(--tg-text-muted);
+    --accent: var(--tg-cyan);
+    --accent-hover: var(--tg-cyan-dim);
+    --accent-dim: rgba(4, 106, 56, 0.10);
+    --accent-glow: rgba(4, 106, 56, 0.20);
+    --sev-critical: var(--tg-red);
+    --sev-high: var(--tg-amber);
+    --sev-medium: var(--tg-teal);
+    --sev-low: var(--tg-sky);
+}
+
+/* Optional dark mode retained as a toggle */
+html.dark {
+    --tg-bg: #050505;
+    --tg-surface: #0c0c0c;
+    --tg-surface-2: #121212;
+    --tg-border: #1f1f1f;
+    --tg-border-strong: #333333;
+    --tg-text: #f3f4f6;
+    --tg-text-dim: #9ca3af;
+    --tg-text-muted: #75787b;
+    --tg-text-hint: #4b5563;
+    --tg-cyan: #34d399;
+    --tg-cyan-dim: #10b981;
+    --tg-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --tg-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    --bg-hover: #171717;
+    --accent-dim: rgba(52, 211, 153, 0.15);
+    --accent-glow: rgba(52, 211, 153, 0.30);
+}
+
+@layer base {
+    * { border-color: var(--tg-border); }
+    html, body {
+        background: var(--tg-bg);
+        color: var(--tg-text);
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        letter-spacing: -0.005em;
+        font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+        -webkit-font-smoothing: antialiased;
+    }
+    ::selection {
+        background: rgba(4, 106, 56, 0.18);
+        color: var(--tg-text);
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: var(--tg-bg); }
+    ::-webkit-scrollbar-thumb { background: #bbbcbc; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #97999b; }
+    :focus-visible {
+        outline: 2px solid var(--tg-lime);
+        outline-offset: 2px;
+        border-radius: 4px;
+    }
+}
+
+/* ---------- Typography helpers ---------- */
+.font-display {
+    font-family: 'Manrope', system-ui, sans-serif;
+    letter-spacing: -0.02em;
+    font-weight: 700;
+}
+.font-mono, .font-mono * {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.tg-comment {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--tg-text-muted);
+}
+.tg-comment::before { content: "// "; color: var(--tg-cyan); }
+
+/* ---------- Surfaces (cards) ---------- */
+.tg-surface {
+    background: var(--tg-surface);
+    border: 1px solid var(--tg-border);
+    border-radius: 16px;
+    box-shadow: var(--tg-shadow-sm);
+    transition: box-shadow 0.25s cubic-bezier(0.2, 0.8, 0.2, 1),
+                border-color 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.tg-surface:hover {
+    box-shadow: var(--tg-shadow);
+    border-color: var(--tg-border-strong);
+}
+.tg-surface-flat { background: var(--tg-surface-2); border: 1px solid var(--tg-border); border-radius: 12px; }
+
+/* Legacy alias — many pages use .tactical-panel; keep it wired to the new look */
+.tactical-panel {
+    background: var(--tg-surface);
+    border: 1px solid var(--tg-border);
+    border-radius: 16px;
+    box-shadow: var(--tg-shadow-sm);
+    transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.tactical-panel:hover {
+    box-shadow: var(--tg-shadow);
+    border-color: var(--tg-border-strong);
+}
+
+/* ---------- Severity chips ---------- */
+.tg-sev {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    line-height: 1.4;
+}
+.tg-sev::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+}
+.tg-sev-critical  { color: var(--tg-red);    background: rgba(217, 45, 32, 0.08);  border-color: rgba(217, 45, 32, 0.22); }
+.tg-sev-high      { color: var(--tg-amber);  background: rgba(184, 134, 11, 0.10); border-color: rgba(184, 134, 11, 0.24); }
+.tg-sev-medium    { color: var(--tg-teal);   background: rgba(0, 151, 169, 0.10);  border-color: rgba(0, 151, 169, 0.22); }
+.tg-sev-low       { color: var(--tg-sky);    background: rgba(0, 163, 224, 0.10);  border-color: rgba(0, 163, 224, 0.22); }
+.tg-sev-info      { color: var(--tg-text-dim); background: rgba(83, 86, 90, 0.10);  border-color: rgba(83, 86, 90, 0.22); }
+.tg-sev-healthy   { color: var(--tg-cyan);   background: rgba(4, 106, 56, 0.10);   border-color: rgba(4, 106, 56, 0.22); }
+
+/* Status chips (offense lifecycle) */
+.tg-status {
+    display: inline-flex;
+    align-items: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--tg-border);
+    background: var(--tg-surface-2);
+    color: var(--tg-text-dim);
+}
+.tg-status-open           { color: var(--tg-sky);   border-color: rgba(0, 163, 224, 0.32); background: rgba(0, 163, 224, 0.06); }
+.tg-status-investigating  { color: var(--tg-amber); border-color: rgba(184, 134, 11, 0.32); background: rgba(184, 134, 11, 0.06); }
+.tg-status-pending        { color: var(--tg-blue-deep); border-color: rgba(1, 33, 105, 0.28); background: rgba(1, 33, 105, 0.06); }
+.tg-status-escalated      { color: var(--tg-red); border-color: rgba(217, 45, 32, 0.28); background: rgba(217, 45, 32, 0.06); }
+.tg-status-resolved       { color: var(--tg-cyan); border-color: rgba(4, 106, 56, 0.28); background: rgba(4, 106, 56, 0.06); }
+.tg-status-closed         { color: var(--tg-text-muted); border-color: var(--tg-border); background: var(--tg-surface-2); }
+
+/* ---------- Buttons ---------- */
+.tg-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    border-radius: 8px;
+    border: 1px solid var(--tg-border);
+    background: var(--tg-surface);
+    color: var(--tg-text-dim);
+    transition: all 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+    cursor: pointer;
+    font-weight: 500;
+}
+.tg-btn:hover { background: var(--tg-surface-2); color: var(--tg-text); border-color: var(--tg-border-strong); }
+.tg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.tg-btn-primary {
+    background: var(--tg-cyan);
+    color: #ffffff;
+    border-color: var(--tg-cyan);
+    font-weight: 600;
+}
+.tg-btn-primary:hover { background: var(--tg-cyan-dim); border-color: var(--tg-cyan-dim); color: #ffffff; }
+.tg-btn-danger {
+    color: var(--tg-red);
+    border-color: rgba(217, 45, 32, 0.35);
+}
+.tg-btn-danger:hover { background: rgba(217, 45, 32, 0.06); color: var(--tg-red); }
+
+/* ---------- Sidebar nav ---------- */
+.sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 14px;
+    color: var(--tg-text-dim);
+    border-left: 2px solid transparent;
+    font-size: 13px;
+    letter-spacing: -0.005em;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+    text-decoration: none;
+    margin: 2px 8px;
+    border-radius: 8px;
+}
+.sidebar-item:hover { background: var(--tg-surface-2); color: var(--tg-text); }
+.sidebar-item.active {
+    color: var(--tg-cyan);
+    background: rgba(134, 188, 37, 0.14);
+    font-weight: 500;
+}
+.sidebar-item.active svg { color: var(--tg-cyan); }
+
+/* ---------- Motion ---------- */
+@keyframes tg-stagger-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.tg-stagger > * {
+    animation: tg-stagger-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.tg-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.tg-stagger > *:nth-child(2) { animation-delay: 40ms; }
+.tg-stagger > *:nth-child(3) { animation-delay: 80ms; }
+.tg-stagger > *:nth-child(4) { animation-delay: 120ms; }
+.tg-stagger > *:nth-child(5) { animation-delay: 160ms; }
+.tg-stagger > *:nth-child(6) { animation-delay: 200ms; }
+.tg-stagger > *:nth-child(7) { animation-delay: 240ms; }
+.tg-stagger > *:nth-child(8) { animation-delay: 280ms; }
+.stagger > * { animation: tg-stagger-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+@keyframes tg-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(67, 176, 42, 0.5); }
+    50%      { box-shadow: 0 0 0 6px rgba(67, 176, 42, 0);  }
+}
+.tg-pulse { animation: tg-pulse 2s ease-in-out infinite; }
+
+@keyframes tg-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.blink-cursor::after { content: "▍"; margin-left: 4px; animation: tg-blink 1.2s infinite; }
+.tg-blink { animation: tg-blink 1.4s infinite; }
+
+.fade-in-up { animation: tg-stagger-in 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+/* Tab underline */
+.tab-active {
+    color: var(--tg-cyan);
+    border-bottom-color: var(--tg-cyan) !important;
+    font-weight: 600;
+}
+
+/* KPI text look-and-feel */
+.metric-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--tg-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    margin-bottom: 8px;
+}
+.metric-value {
+    font-family: 'Manrope', system-ui, sans-serif;
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--tg-text);
+    line-height: 1;
+    letter-spacing: -0.02em;
+}
+
+/* Utility: inline monospace field label */
+.tg-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--tg-text-muted);
+}
+
+/* Model / method badge */
+.tg-model {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--tg-cyan);
+    background: rgba(4, 106, 56, 0.06);
+    border: 1px solid rgba(4, 106, 56, 0.24);
+    border-radius: 6px;
+}
+
+/* Payload-viewer & inline-code readability on light bg */
+.payload-viewer {
+    background: var(--tg-surface-2);
+    border: 1px solid var(--tg-border);
+    border-radius: 8px;
+    color: var(--tg-text);
+    padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+.payload-viewer .ioc-ipv4 { color: var(--tg-red); font-weight: 600; }
+.payload-viewer .ioc-ipv4-priv { color: var(--tg-indigo); }
+.payload-viewer .ioc-hash { color: var(--tg-red); font-weight: 600; }
+.payload-viewer .ioc-url { color: var(--tg-cyan); text-decoration: underline; }
+.payload-viewer .ioc-domain { color: var(--tg-cyan); }
+
+/* ============================================================
+   LIGHT-MODE COMPATIBILITY OVERRIDES
+   Many pages were originally written for the dark theme with
+   hard-coded hex Tailwind classes (bg-[#050505], border-[#1F1F1F],
+   text-neutral-500, text-cyan-400 …). Rather than touch every
+   JSX file, we remap those classes to ThreatGraph tokens whenever
+   the app is NOT in dark mode.
+   ============================================================ */
+html:not(.dark) .bg-\[\#050505\],
+html:not(.dark) .bg-\[\#0C0C0C\],
+html:not(.dark) .bg-\[\#080808\],
+html:not(.dark) .bg-\[\#0F0F0F\],
+html:not(.dark) .bg-\[\#141414\],
+html:not(.dark) .bg-\[\#171717\],
+html:not(.dark) .bg-\[\#0a0a0a\],
+html:not(.dark) .bg-\[\#0d0d0d\],
+html:not(.dark) .bg-\[\#101010\],
+html:not(.dark) .bg-\[\#121212\],
+html:not(.dark) .bg-\[\#181818\],
+html:not(.dark) .bg-\[\#1a1a1a\],
+html:not(.dark) .bg-\[\#1F1F1F\],
+html:not(.dark) .bg-neutral-950,
+html:not(.dark) .bg-neutral-900,
+html:not(.dark) .bg-neutral-800,
+html:not(.dark) .bg-black {
+    background-color: var(--tg-surface) !important;
+}
+/* Row hover / secondary panel greys → surface-2 */
+html:not(.dark) .hover\:bg-\[\#111\]:hover,
+html:not(.dark) .hover\:bg-\[\#141414\]:hover,
+html:not(.dark) .hover\:bg-\[\#0F0F0F\]:hover,
+html:not(.dark) .hover\:bg-\[\#171717\]:hover,
+html:not(.dark) .hover\:bg-neutral-900:hover,
+html:not(.dark) .hover\:bg-neutral-800:hover,
+html:not(.dark) .bg-\[\#111\],
+html:not(.dark) .bg-\[\#0e0e0e\] {
+    background-color: var(--tg-surface-2) !important;
+}
+
+/* Any dark hairline border → ThreatGraph hairline */
+html:not(.dark) .border-\[\#1F1F1F\],
+html:not(.dark) .border-\[\#141414\],
+html:not(.dark) .border-\[\#0F0F0F\],
+html:not(.dark) .border-\[\#0d0d0d\],
+html:not(.dark) .border-\[\#080808\],
+html:not(.dark) .border-\[\#050505\],
+html:not(.dark) .border-\[\#171717\],
+html:not(.dark) .border-\[\#1a1a1a\],
+html:not(.dark) .border-\[\#333333\],
+html:not(.dark) .border-neutral-900,
+html:not(.dark) .border-neutral-800,
+html:not(.dark) .border-neutral-700,
+html:not(.dark) .border-black {
+    border-color: var(--tg-border) !important;
+}
+html:not(.dark) .hover\:border-\[\#1F1F1F\]:hover,
+html:not(.dark) .hover\:border-neutral-800:hover,
+html:not(.dark) .hover\:border-neutral-700:hover {
+    border-color: var(--tg-border-strong) !important;
+}
+
+/* Divide-y greys */
+html:not(.dark) .divide-\[\#1F1F1F\] > :not([hidden]) ~ :not([hidden]),
+html:not(.dark) .divide-\[\#0F0F0F\] > :not([hidden]) ~ :not([hidden]),
+html:not(.dark) .divide-neutral-900 > :not([hidden]) ~ :not([hidden]),
+html:not(.dark) .divide-neutral-800 > :not([hidden]) ~ :not([hidden]) {
+    border-color: var(--tg-border) !important;
+}
+
+/* Text greys — pull them into the ThreatGraph text ladder for legibility */
+html:not(.dark) .text-neutral-500 { color: var(--tg-text-muted) !important; }
+html:not(.dark) .text-neutral-400 { color: var(--tg-text-dim) !important; }
+html:not(.dark) .text-neutral-300 { color: var(--tg-text) !important; }
+html:not(.dark) .text-neutral-200 { color: var(--tg-text) !important; }
+html:not(.dark) .text-neutral-100 { color: var(--tg-text) !important; }
+html:not(.dark) .text-white { color: var(--tg-text) !important; }
+html:not(.dark) .text-gray-500 { color: var(--tg-text-muted) !important; }
+html:not(.dark) .text-gray-400 { color: var(--tg-text-dim) !important; }
+html:not(.dark) .text-gray-300 { color: var(--tg-text) !important; }
+html:not(.dark) .text-slate-500 { color: var(--tg-text-muted) !important; }
+html:not(.dark) .text-slate-400 { color: var(--tg-text-dim) !important; }
+
+/* Cyan accents from the old dark palette → Deloitte green in light mode */
+html:not(.dark) .text-cyan-400,
+html:not(.dark) .text-cyan-500,
+html:not(.dark) .text-cyan-300,
+html:not(.dark) .text-emerald-400,
+html:not(.dark) .text-emerald-500,
+html:not(.dark) .text-emerald-300 { color: var(--tg-cyan) !important; }
+
+html:not(.dark) .hover\:text-cyan-300:hover,
+html:not(.dark) .hover\:text-cyan-400:hover,
+html:not(.dark) .hover\:text-emerald-300:hover,
+html:not(.dark) .hover\:text-emerald-400:hover { color: var(--tg-cyan-dim) !important; }
+
+html:not(.dark) .border-cyan-500,
+html:not(.dark) .border-cyan-400,
+html:not(.dark) .border-emerald-500,
+html:not(.dark) .border-emerald-400 { border-color: var(--tg-cyan) !important; }
+
+html:not(.dark) .hover\:border-cyan-500:hover,
+html:not(.dark) .hover\:border-cyan-400:hover,
+html:not(.dark) .focus\:border-cyan-500:focus,
+html:not(.dark) .focus\:border-cyan-400:focus { border-color: var(--tg-cyan) !important; }
+
+html:not(.dark) .bg-cyan-400,
+html:not(.dark) .bg-cyan-500,
+html:not(.dark) .bg-emerald-400,
+html:not(.dark) .bg-emerald-500 { background-color: var(--tg-cyan) !important; color: #fff !important; }
+html:not(.dark) .hover\:bg-cyan-300:hover,
+html:not(.dark) .hover\:bg-cyan-400:hover,
+html:not(.dark) .hover\:bg-emerald-300:hover,
+html:not(.dark) .hover\:bg-emerald-400:hover { background-color: var(--tg-cyan-dim) !important; }
+
+/* Faint accent tint (bg-cyan-500/10, bg-emerald-500/10) — normalise */
+html:not(.dark) .bg-cyan-500\/10,
+html:not(.dark) .bg-cyan-500\/20,
+html:not(.dark) .bg-emerald-500\/10,
+html:not(.dark) .bg-emerald-500\/20 { background-color: rgba(4, 106, 56, 0.10) !important; }
+
+/* Rose / amber / yellow / sky accents in light mode already sit on white — leave as-is,
+   but tone down heavy border-rose-500 / rose-500 backgrounds to soft tints */
+html:not(.dark) .bg-rose-500\/10, html:not(.dark) .bg-rose-500\/20 { background-color: rgba(217, 45, 32, 0.08) !important; }
+html:not(.dark) .bg-amber-500\/10, html:not(.dark) .bg-amber-500\/20 { background-color: rgba(184, 134, 11, 0.08) !important; }
+html:not(.dark) .bg-yellow-500\/10, html:not(.dark) .bg-yellow-500\/20 { background-color: rgba(196, 214, 0, 0.14) !important; }
+
+/* Form controls: inputs, selects, textareas placed inline with bg-[#050505] were black.
+   Ensure they read as light surface-2 pills. */
+html:not(.dark) input,
+html:not(.dark) select,
+html:not(.dark) textarea {
+    color: var(--tg-text);
+}
+html:not(.dark) input::placeholder,
+html:not(.dark) textarea::placeholder { color: var(--tg-text-hint); }
+
+/* Selected table row highlight (checked bulk-selection) */
+html:not(.dark) tr.selected,
+html:not(.dark) tr[data-selected="true"] { background-color: rgba(4, 106, 56, 0.05) !important; }
+
+/* Kbd / code-like spans used in the payload viewer */
+html:not(.dark) kbd, html:not(.dark) code {
+    background: var(--tg-surface-2);
+    color: var(--tg-text);
+    border: 1px solid var(--tg-border);
+    padding: 0 4px;
+    border-radius: 4px;
+}
+
