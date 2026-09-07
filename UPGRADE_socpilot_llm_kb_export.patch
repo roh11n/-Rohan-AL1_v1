@@ -1,0 +1,1182 @@
+diff --git a/backend/kb_template.py b/backend/kb_template.py
+new file mode 100644
+index 0000000..80e5cb2
+--- /dev/null
++++ b/backend/kb_template.py
+@@ -0,0 +1,165 @@
++"""Deterministic KB-template analysis engine.
++
++KB mode: when a new offense's alert/rule name matches a manually-added
++knowledge-base entry, reuse that entry's documented analysis / verdict /
++recommendations as a template and swap in the CURRENT offense's artifacts
++(source IP, destination IP, username, offense id, time). No model required.
++"""
++from __future__ import annotations
++
++import re
++from datetime import datetime
++
++
++def _norm(s) -> str:
++    return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
++
++
++def _tokens(s) -> set:
++    return set(_norm(s).split())
++
++
++def _candidates(offense: dict) -> list[str]:
++    out: list[str] = []
++    if offense.get("description"):
++        out.append(offense["description"])
++    for r in offense.get("rules") or []:
++        if r:
++            out.append(r)
++    return out
++
++
++def match_score(offense: dict, kb_entry: dict) -> int:
++    """0-100 how well the offense's alert name matches this KB entry's alert_name."""
++    alert = kb_entry.get("alert_name") or ""
++    at = _tokens(alert)
++    if not at:
++        return 0
++    na = _norm(alert)
++    best = 0
++    for cand in _candidates(offense):
++        nc = _norm(cand)
++        if not nc:
++            continue
++        if na == nc or na in nc or nc in na:
++            return 100
++        ct = _tokens(cand)
++        inter = len(at & ct)
++        contain = int(100 * inter / len(at)) if at else 0
++        best = max(best, contain)
++    return best
++
++
++def find_best_template(offense: dict, entries: list[dict], threshold: int = 60):
++    """Return (best_entry, score) for the highest-scoring KB entry above threshold."""
++    best = None
++    best_score = 0
++    for e in entries or []:
++        s = match_score(offense, e)
++        if s > best_score:
++            best_score = s
++            best = e
++    if best and best_score >= threshold:
++        return best, best_score
++    return None, 0
++
++
++def _fmt_dt(offense: dict):
++    ts = offense.get("start_time")
++    if not ts:
++        return None
++    try:
++        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).strftime("%d %b %Y, %H:%M:%S")
++    except Exception:
++        return str(ts)
++
++
++def _artifacts(offense: dict) -> dict:
++    def first(key):
++        v = offense.get(key) or []
++        return v[0] if v else None
++    return {
++        "source_ip": first("source_ips"),
++        "destination_ip": first("destination_ips"),
++        "username": first("usernames"),
++        "offense_id": offense.get("qradar_offense_id") or offense.get("id"),
++        "date_time": _fmt_dt(offense),
++    }
++
++
++def _substitute(text: str, art: dict) -> str:
++    out = text or ""
++    mapping = {
++        "{source_ip}": art.get("source_ip") or "N/A",
++        "{destination_ip}": art.get("destination_ip") or "N/A",
++        "{username}": art.get("username") or "N/A",
++        "{offense_id}": str(art.get("offense_id") or "N/A"),
++        "{date_time}": art.get("date_time") or "N/A",
++    }
++    for k, v in mapping.items():
++        out = out.replace(k, str(v))
++    return out
++
++
++def template_text(kb_entry: dict) -> str:
++    """Flatten a KB entry into text for vector indexing / LLM context."""
++    parts = [f"Alert: {kb_entry.get('alert_name', '')}"]
++    if kb_entry.get("analysis"):
++        parts.append(f"Analysis: {kb_entry['analysis']}")
++    if kb_entry.get("verdict"):
++        parts.append(f"Verdict: {kb_entry['verdict']}")
++    if kb_entry.get("recommendations"):
++        parts.append("Recommendations: " + "; ".join(kb_entry["recommendations"]))
++    return "\n".join(parts)
++
++
++def build_kb_template_report(offense: dict, events: list[dict], kb_entry: dict,
++                             base_report: dict, score: int) -> dict:
++    """Adapt a KB entry's documented analysis to the current offense's artifacts.
++    Starts from the rule-engine report (base_report) to keep extracted fields,
++    then overrides analysis_lines / verdict / recommendations from the template."""
++    art = _artifacts(offense)
++    base = dict(base_report or {})
++
++    lines = []
++    n = 1
++    lines.append({"n": n, "text": (
++        f"This alert matches the knowledge-base template '{kb_entry.get('alert_name')}' "
++        f"(name match {score}%). Reusing the documented analysis and adapting it to this "
++        f"offense's artifacts.")})
++    n += 1
++
++    analysis_txt = _substitute(kb_entry.get("analysis") or "", art)
++    for seg in re.split(r"(?:\r?\n)+|(?<=[.;])\s+(?=[A-Z0-9])", analysis_txt):
++        seg = seg.strip()
++        if seg:
++            lines.append({"n": n, "text": seg})
++            n += 1
++
++    obs = []
++    if art.get("source_ip"):
++        obs.append(f"Source IP: {art['source_ip']}")
++    if art.get("destination_ip"):
++        obs.append(f"Destination IP: {art['destination_ip']}")
++    if art.get("username"):
++        obs.append(f"Username: {art['username']}")
++    if art.get("date_time"):
++        obs.append(f"Time: {art['date_time']}")
++    obs.append(f"Offense ID: {art.get('offense_id')}")
++    lines.append({"n": n, "text": "Observed artifacts in this offense — " + "; ".join(obs) + "."})
++
++    base["analysis_lines"] = lines
++    if kb_entry.get("verdict"):
++        base["verdict"] = kb_entry["verdict"]
++    base["verdict_reason"] = _substitute(
++        base.get("verdict_reason") or f"Consistent with knowledge-base entry '{kb_entry.get('alert_name')}'.",
++        art,
++    )
++    if kb_entry.get("recommendations"):
++        base["recommendations"] = [_substitute(r, art) for r in kb_entry["recommendations"]]
++    if base.get("recommendations"):
++        base["recommendation_text"] = base["recommendations"][0]
++    base["generated_by"] = f"kb-template:{kb_entry.get('alert_name')}"
++    base["kb_template_alert"] = kb_entry.get("alert_name")
++    base["kb_template_score"] = score
++    return base
+diff --git a/backend/llm_engine.py b/backend/llm_engine.py
+index eb5ddea..12cfcc2 100644
+--- a/backend/llm_engine.py
++++ b/backend/llm_engine.py
+@@ -385,7 +385,7 @@ def _step3_verify(model_name: str, offense: dict, events: list[dict],
+ def build_llm_mssp_report(offense: dict, events: list[dict],
+                           kb_matches: list[dict],
+                           rule_engine_mssp: dict,
+-                          model_name: str = "Qwen/Qwen2.5-3B-Instruct",
++                          model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+                           temperature: float = 0.3,
+                           step_timeout_seconds: int = 180) -> dict | None:
+     """Run the 3-step LLM chain. Returns a full MSSP report dict on success, else None.
+@@ -464,3 +464,87 @@ def build_llm_mssp_report(offense: dict, events: list[dict],
+ 
+ def load_error() -> str | None:
+     return _STATE.get("load_error")
++
++
++def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
++                                  kb_matches: list[dict],
++                                  rule_engine_mssp: dict,
++                                  model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
++                                  temperature: float = 0.3,
++                                  timeout_seconds: int = 240) -> dict | None:
++    """Single compact local-LLM pass producing the MSSP analysis. Reuses the
++    rule-engine's already-extracted fields and asks the model for a SHORT JSON
++    (few analysis lines) so generation stays affordable on CPU. Intended to run
++    in the background. Returns a drop-in mssp_report dict, or None to fall back."""
++    started = time.time()
++    try:
++        sys_msg = (
++            "You are a SOC L1 analyst. Using the offense, its events and the knowledge-base "
++            "reference (a prior incident with the SAME alert name), write the analysis for THIS "
++            "offense. Reuse the reference's reasoning and verdict, but replace its artifacts with "
++            "THIS offense's actual artifacts (source IP, destination IP, username, time). "
++            "Return ONLY compact JSON: {\"analysis_lines\":[{\"n\":1,\"text\":\"...\"}],"
++            "\"verdict\":\"TP|FP|Suspicious\",\"verdict_reason\":\"...\","
++            "\"recommendations\":[\"...\"]}. Use 3-5 short analysis_lines."
++        )
++        user_msg = (
++            "Offense:\n" + _fmt_offense(offense) + "\n"
++            "Top events:\n" + _fmt_events(events, limit=3) + "\n\n"
++            "Knowledge-base reference (adapt this):\n" + _weighted_kb_context(kb_matches, max_docs=2) + "\n\n"
++            "Return ONLY the JSON object."
++        )
++        reply = _chat_with_timeout(
++            model_name,
++            [{"role": "system", "content": sys_msg},
++             {"role": "user", "content": user_msg}],
++            max_new_tokens=320, temperature=temperature, timeout_seconds=timeout_seconds,
++        )
++        parsed = _extract_json(reply)
++        if not isinstance(parsed, dict):
++            return None
++        v = str(parsed.get("verdict") or "").strip()
++        if v not in ("TP", "FP", "Suspicious"):
++            low = v.lower()
++            v = "FP" if "false" in low else ("TP" if "true" in low else "Suspicious")
++        reason = str(parsed.get("verdict_reason") or "").strip()
++        recs = [str(r)[:2000] for r in (parsed.get("recommendations") or []) if str(r).strip()]
++
++        # Model's analysis lines (weak 0.5B models often leave these empty and
++        # push the reasoning into verdict_reason — so synthesize when missing).
++        model_lines = []
++        for ln in parsed.get("analysis_lines") or []:
++            if isinstance(ln, dict) and ln.get("text"):
++                model_lines.append(str(ln["text"])[:2000])
++            elif isinstance(ln, str) and ln.strip():
++                model_lines.append(ln.strip()[:2000])
++        if not model_lines and reason:
++            model_lines = [s.strip() for s in re.split(r"(?<=[.;])\s+", reason) if s.strip()]
++        if not model_lines and not reason:
++            return None  # nothing usable from the model
++
++        def _first(key):
++            arr = offense.get(key) or []
++            return arr[0] if arr else None
++        obs = []
++        if _first("source_ips"): obs.append(f"Source IP: {_first('source_ips')}")
++        if _first("destination_ips"): obs.append(f"Destination IP: {_first('destination_ips')}")
++        if _first("usernames"): obs.append(f"Username: {_first('usernames')}")
++        obs.append(f"Offense ID: {offense.get('qradar_offense_id') or offense.get('id')}")
++
++        lines = [{"n": i, "text": t} for i, t in enumerate(model_lines, 1)]
++        lines.append({"n": len(lines) + 1,
++                      "text": "Observed artifacts in this offense — " + "; ".join(obs) + "."})
++
++        out = dict(rule_engine_mssp or {})
++        out["analysis_lines"] = lines
++        out["recommendations"] = recs or out.get("recommendations") or []
++        out["verdict"] = v
++        out["verdict_reason"] = reason or out.get("verdict_reason") or ""
++        if out.get("recommendations"):
++            out["recommendation_text"] = out["recommendations"][0]
++        out["generated_by"] = f"llm:{model_name}"
++        out["llm_total_seconds"] = round(time.time() - started, 1)
++        return out
++    except Exception as e:  # noqa: BLE001
++        logger.warning("LLM one-shot pipeline failure: %s — falling back.", e)
++        return None
+diff --git a/backend/models.py b/backend/models.py
+index 04cc9c5..e99410b 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -155,6 +155,13 @@ class KBEntry(BaseModel):
+     uploaded_by: str = ""
+     uploaded_at: str = Field(default_factory=_now)
+     completed_at: Optional[str] = None
++    # Manual "historical data" entries (entry_kind="manual") carry structured fields
++    entry_kind: str = "file"  # file | manual | analyst_feedback
++    alert_name: Optional[str] = None
++    analysis: Optional[str] = None
++    verdict: Optional[str] = None  # TP | FP | Suspicious
++    recommendations: List[str] = Field(default_factory=list)
++    rag_source: Optional[str] = None
+ 
+ 
+ # ----- Settings -----
+@@ -169,13 +176,14 @@ class QRadarSettings(BaseModel):
+ 
+ class LLMSettings(BaseModel):
+     provider: str = "local"  # local | huggingface | ollama
+-    model_name: str = "Qwen/Qwen2.5-3B-Instruct"
++    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
++    analysis_mode: str = "kb"  # kb (deterministic template) | llm (local Qwen)
+     endpoint_url: str = ""
+     api_token: str = ""
+     max_tokens: int = 512
+     temperature: float = 0.3
+-    enable_llm: bool = False  # off by default - uses rule engine
+-    llm_step_timeout_seconds: int = 180  # per-step timeout for LLM inference (CPU)
++    enable_llm: bool = False  # legacy flag; analysis_mode drives behaviour
++    llm_step_timeout_seconds: int = 90  # per-step timeout for LLM inference (CPU)
+ 
+ 
+ class IntegrationCred(BaseModel):
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 5580d48..9549171 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -31,3 +31,4 @@ sentence-transformers>=5.0.0
+ PyPDF2>=3.0.0
+ python-docx>=1.2.0
+ openpyxl>=3.1.0
++accelerate>=1.0.0
+diff --git a/backend/server.py b/backend/server.py
+index 839ed59..cc823df 100644
+--- a/backend/server.py
++++ b/backend/server.py
+@@ -33,6 +33,7 @@ from sample_data import generate_sample_offenses
+ import soc_engine
+ import rag_store
+ import kb_ingest
++import kb_template
+ from qradar_client import QRadarClient
+ 
+ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+@@ -262,6 +263,10 @@ def _assert_tenant_access(user: dict, client_id: Optional[str]) -> None:
+     """Raise 403 unless the caller may operate on `client_id`."""
+     if client_id is None:
+         return
++    if client_id == "ALL":
++        # Global "all tenants" KB scope is readable/writable by any authenticated user
++        # (write endpoints still enforce role via require_roles).
++        return
+     if _is_unrestricted(user):
+         return
+     if client_id not in set(user.get("tenant_ids") or []):
+@@ -574,6 +579,25 @@ async def list_offenses(client_id: Optional[str] = None, severity: Optional[str]
+     return docs
+ 
+ 
++@api.get("/offenses/export")
++async def export_offenses(client_id: Optional[str] = None, ids: Optional[str] = None,
++                          user: dict = Depends(get_current_user)):
++    """Export FULL offenses (including events + raw payloads) as JSON so they can
++    be copied/shared for debugging or re-imported. Respects tenant access."""
++    q = _tenant_filter(user, client_id)
++    if ids:
++        q["id"] = {"$in": [x for x in ids.split(",") if x]}
++    docs = await db.offenses.find(q, {"_id": 0}).sort("start_time", -1).to_list(2000)
++    return {
++        "export_version": 1,
++        "exported_at": _now(),
++        "exported_by": user.get("email"),
++        "client_id": client_id,
++        "count": len(docs),
++        "offenses": docs,
++    }
++
++
+ @api.get("/offenses/{offense_id}")
+ async def get_offense(offense_id: str, user: dict = Depends(get_current_user)):
+     doc = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
+@@ -604,6 +628,12 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
+         for m in extra:
+             if m.get("text") not in seen:
+                 kb_matches.append(m)
++                seen.add(m.get("text"))
++        # Global "ALL tenants" KB applies to every client
++        for m in rag_store.query("ALL", query_text, n_results=4):
++            if m.get("text") not in seen:
++                kb_matches.append(m)
++                seen.add(m.get("text"))
+     except Exception as e:
+         logger.warning("KB RAG failed: %s", e)
+ 
+@@ -629,15 +659,11 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
+     settings_doc = await db.settings.find_one({"id": "global"}, {"_id": 0}) or {}
+     llm_cfg = settings_doc.get("llm", {})
+     ti_cfg = settings_doc.get("threat_intel", {})
++    analysis_mode = (llm_cfg.get("analysis_mode") or ("llm" if llm_cfg.get("enable_llm") else "kb")).lower()
++
++    # The MSSP report is the LLM target (generated in the background for LLM mode).
++    # We do NOT run a blocking narrative LLM call here — it would stall the request.
+     narrative = None
+-    if llm_cfg.get("enable_llm"):
+-        iocs_pre = soc_engine.extract_iocs("\n".join([str(doc.get(k, "")) for k in ("description",)] +
+-                                                     [str(e.get("payload", "")) for e in doc.get("events", [])]))
+-        mitre_pre = soc_engine.map_mitre(doc.get("description", ""), doc.get("categories", []))
+-        risk_pre = soc_engine.compute_risk_score(doc, mitre_pre, iocs_pre)
+-        rec_pre, _ = soc_engine.recommend(risk_pre, mitre_pre, doc)
+-        narrative = soc_engine.llm_narrative(doc, iocs_pre, mitre_pre, risk_pre, rec_pre,
+-                                             llm_cfg.get("model_name", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"))
+ 
+     # Load learned rule adjustments (Analyst Coach)
+     adj_docs = await db.learned_adjustments.find({}, {"_id": 0}).to_list(500)
+@@ -647,40 +673,43 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
+                                           llm_narrative=narrative, ti_settings=ti_cfg,
+                                           learned_adjustments=learned_adjustments)
+ 
+-    # --- LLM-driven MSSP report (best-effort; falls back to rule engine on any failure) ---
+-    if llm_cfg.get("enable_llm"):
+-        try:
+-            import llm_engine  # local import — heavy transformers stack, lazy load
+-            rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
+-            model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-3B-Instruct"
+-            timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 180)
+-            temperature = float(llm_cfg.get("temperature") or 0.3)
+-            # Run the CPU-bound LLM chain off the event loop so the endpoint
+-            # remains responsive during token generation.
+-            loop = asyncio.get_event_loop()
+-            llm_mssp = await loop.run_in_executor(
+-                None,
+-                llm_engine.build_llm_mssp_report,
+-                doc, doc.get("events") or [], kb_matches, rule_engine_mssp,
+-                model_name, temperature, timeout,
+-            )
+-            if llm_mssp:
+-                analysis["mssp_report"] = llm_mssp
+-                analysis["mssp_report_source"] = "llm"
+-            else:
+-                # Explicit fallback stamp so analysts/admins can see why.
+-                reason = llm_engine.load_error() or "invalid_output_or_timeout"
+-                analysis["mssp_report"] = analysis.get("mssp_report") or {}
+-                analysis["mssp_report"]["generated_by"] = f"rule-engine (LLM fallback: {reason})"
+-                analysis["mssp_report_source"] = "rule-engine-fallback"
+-                logger.warning("LLM MSSP report unavailable — falling back for offense %s: %s",
+-                               offense_id, reason)
+-        except Exception as e:  # noqa: BLE001
+-            logger.warning("LLM MSSP pipeline errored for offense %s: %s — falling back.",
+-                           offense_id, e)
+-            analysis["mssp_report"] = analysis.get("mssp_report") or {}
+-            analysis["mssp_report"]["generated_by"] = f"rule-engine (LLM fallback: {e})"
+-            analysis["mssp_report_source"] = "rule-engine-fallback"
++    # --- KB-template / LLM MSSP report ---
++    # Match the offense's alert name against manually-added KB "historical data"
++    # (client-scoped + global "ALL tenants" entries).
++    manual_entries = await db.kb_entries.find(
++        {"entry_kind": "manual", "client_id": {"$in": [doc["client_id"], "ALL"]}},
++        {"_id": 0},
++    ).to_list(500)
++    matched_kb, match_score = kb_template.find_best_template(doc, manual_entries)
++    rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
++
++    # Base report: KB-template if a manual entry matches the alert name, else rule engine.
++    if matched_kb:
++        base_mssp = kb_template.build_kb_template_report(
++            doc, doc.get("events") or [], matched_kb, rule_engine_mssp, match_score)
++        base_source = "kb-template"
++    else:
++        base_mssp = dict(rule_engine_mssp)
++        base_mssp.setdefault("generated_by", "rule-engine")
++        base_source = "rule-engine"
++    analysis["mssp_report"] = base_mssp
++    analysis["mssp_report_source"] = base_source
++
++    # In LLM mode, Qwen refines the report in the BACKGROUND (CPU generation
++    # exceeds the ingress request window). The response returns immediately with
++    # the KB/rule report stamped llm_status="pending"; the UI polls for the update.
++    schedule_llm = analysis_mode == "llm"
++    if schedule_llm:
++        analysis["llm_status"] = "pending"
++        analysis["mssp_report"]["llm_status"] = "pending"
++        llm_kb = list(kb_matches)
++        if matched_kb:
++            llm_kb.insert(0, {
++                "text": kb_template.template_text(matched_kb),
++                "kb_type": "analyst_feedback",
++                "source": f"manual:{matched_kb.get('alert_name')}",
++                "similarity": 0.99,
++            })
+ 
+     updates = {
+         "ai_analysis": analysis,
+@@ -696,10 +725,56 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
+     }
+     await db.offenses.update_one({"id": offense_id}, {"$set": updates})
+     await _audit(user["email"], "investigate", "offense", offense_id, {"risk": analysis["risk_score"]})
++    if schedule_llm:
++        model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-0.5B-Instruct"
++        timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 240)
++        temperature = float(llm_cfg.get("temperature") or 0.3)
++        asyncio.create_task(_run_llm_report_bg(
++            offense_id, doc, doc.get("events") or [], llm_kb, rule_engine_mssp,
++            model_name, temperature, max(300, timeout)))
+     new_doc = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
+     return new_doc
+ 
+ 
++async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: list,
++                             rule_engine_mssp: dict, model_name: str,
++                             temperature: float, timeout: int):
++    """Background: run the local Qwen one-shot and patch the offense's MSSP report."""
++    try:
++        import llm_engine  # heavy transformers stack — lazy
++        loop = asyncio.get_event_loop()
++        llm_mssp = await loop.run_in_executor(
++            None, llm_engine.build_llm_mssp_report_oneshot,
++            doc, events, llm_kb, rule_engine_mssp, model_name, temperature, timeout)
++        cur = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
++        if not cur:
++            return
++        ai = cur.get("ai_analysis") or {}
++        if llm_mssp:
++            llm_mssp["llm_status"] = "done"
++            ai["mssp_report"] = llm_mssp
++            ai["mssp_report_source"] = "llm"
++            ai["llm_status"] = "done"
++        else:
++            reason = llm_engine.load_error() or "invalid_output_or_timeout"
++            ai["llm_status"] = "failed"
++            if ai.get("mssp_report"):
++                ai["mssp_report"]["llm_status"] = "failed"
++                ai["mssp_report"]["llm_error"] = reason
++            logger.warning("Background LLM report unavailable for %s: %s", offense_id, reason)
++        await db.offenses.update_one({"id": offense_id},
++                                     {"$set": {"ai_analysis": ai, "last_updated": _now()}})
++    except Exception as e:  # noqa: BLE001
++        logger.warning("Background LLM report errored for %s: %s", offense_id, e)
++        cur = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
++        if cur:
++            ai = cur.get("ai_analysis") or {}
++            ai["llm_status"] = "failed"
++            if ai.get("mssp_report"):
++                ai["mssp_report"]["llm_status"] = "failed"
++            await db.offenses.update_one({"id": offense_id}, {"$set": {"ai_analysis": ai}})
++
++
+ class OffenseCloseRequest(BaseModel):
+     closure_comments: str
+     closure_source: str = "analyst"  # analyst | xsoar | duplicate
+@@ -1290,6 +1365,63 @@ async def list_kb(client_id: str, user: dict = Depends(get_current_user)):
+     return await db.kb_entries.find({"client_id": client_id}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+ 
+ 
++class KBManualRequest(BaseModel):
++    client_id: str  # a client id OR "ALL" for a global entry applicable to every tenant
++    alert_name: str
++    analysis: str
++    verdict: Optional[str] = None  # TP | FP | Suspicious
++    recommendations: List[str] = []
++    kb_type: str = "historical_incident"
++
++
++@api.post("/kb/manual")
++async def add_kb_manual(payload: KBManualRequest,
++                        user: dict = Depends(require_roles([UserRole.ADMIN, UserRole.SOC_MANAGER, UserRole.L2, UserRole.L3]))):
++    """Add historical analysis data by hand (Name + Analysis [+ Verdict, Recommendations]).
++    Stored structured (for the KB-template matcher) AND vector-indexed (for RAG retrieval).
++    Use client_id="ALL" to make the entry apply to every tenant."""
++    _assert_tenant_access(user, payload.client_id)
++    if not payload.alert_name.strip() or not payload.analysis.strip():
++        raise HTTPException(400, "alert_name and analysis are required")
++    recs = [r.strip() for r in (payload.recommendations or []) if r.strip()]
++    verdict = (payload.verdict or "").strip() or None
++    if verdict and verdict not in ("TP", "FP", "Suspicious"):
++        verdict = None
++    source = f"manual-{uuid.uuid4().hex[:12]}"
++    entry = KBEntry(
++        client_id=payload.client_id,
++        kb_type=payload.kb_type or "historical_incident",
++        filename=payload.alert_name.strip(),
++        content_summary=payload.analysis.strip()[:280],
++        document_count=0,
++        status="PROCESSING",
++        entry_kind="manual",
++        alert_name=payload.alert_name.strip(),
++        analysis=payload.analysis.strip(),
++        verdict=verdict,
++        recommendations=recs,
++        rag_source=source,
++        uploaded_by=user["email"],
++    )
++    await db.kb_entries.insert_one(entry.model_dump())
++    # Index into the vector store so it is also retrieved during LLM investigations.
++    chunks = _chunk_for_rag(kb_template.template_text(entry.model_dump()))
++    added = 0
++    try:
++        loop = asyncio.get_event_loop()
++        added = await loop.run_in_executor(
++            None, rag_store.add_documents, payload.client_id, entry.kb_type, source, chunks)
++    except Exception as e:
++        logger.warning("Manual KB vector index failed: %s", e)
++    await db.kb_entries.update_one(
++        {"id": entry.id},
++        {"$set": {"status": "READY", "document_count": added or len(chunks), "completed_at": _now()}},
++    )
++    await _audit(user["email"], "add_manual", "kb", entry.id,
++                 {"alert_name": entry.alert_name, "scope": payload.client_id})
++    return await db.kb_entries.find_one({"id": entry.id}, {"_id": 0})
++
++
+ @api.post("/kb/upload")
+ async def upload_kb(client_id: str = Form(...), kb_type: str = Form(...),
+                     file: UploadFile = File(...),
+@@ -1358,7 +1490,7 @@ async def delete_kb(entry_id: str,
+     if not doc:
+         raise HTTPException(404, "Not found")
+     _assert_tenant_access(user, doc.get("client_id"))
+-    rag_store.delete_for_client(doc["client_id"], doc["filename"])
++    rag_store.delete_for_client(doc["client_id"], doc.get("rag_source") or doc["filename"])
+     await db.kb_entries.delete_one({"id": entry_id})
+     await _audit(user["email"], "delete", "kb", entry_id)
+     return {"deleted": True}
+diff --git a/backend/soc_engine.py b/backend/soc_engine.py
+index d8c67ba..d06b6a2 100644
+--- a/backend/soc_engine.py
++++ b/backend/soc_engine.py
+@@ -344,7 +344,7 @@ def _build_timeline(off: dict, events: list[dict]) -> list[dict]:
+         tl.append({
+             "ts": e.get("event_time"),
+             "label": e.get("event_name") or e.get("category") or "Event",
+-            "detail": (e.get("payload") or "")[:200],
++            "detail": (e.get("decoded_payload") or e.get("payload") or ""),
+         })
+     tl.append({
+         "ts": off.get("last_updated"),
+@@ -630,9 +630,10 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+     if log_source_name:
+         log_source_str = f"{log_source_name} @ {log_source_ip}" if log_source_ip else log_source_name
+ 
+-    src_ip = _first(offense.get("source_ips"))
+-    dst_ip = _first(offense.get("destination_ips"))
+-    username = _first(offense.get("usernames"))
++    payload_kv = _parse_payload_kv(events)
++    src_ip = _first(offense.get("source_ips")) or payload_kv.get("source_ip")
++    dst_ip = _first(offense.get("destination_ips")) or payload_kv.get("destination_ip")
++    username = _first(offense.get("usernames")) or payload_kv.get("username")
+ 
+     # Date formatting: "21 Jul 2026, 09:29:58"
+     from datetime import datetime as _dt
+@@ -666,7 +667,16 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+     if log_source_str: optional_fields.append(("log_source", "Log source"))
+ 
+     # Discover NEW fields dynamically from event payloads (LLM-style extraction via regex).
+-    discovered = _discover_extra_fields(events)
++    # Prepend the LEEF/key=value parsed fields (ports, protocol, action, rule name).
++    pkv_fields = []
++    if payload_kv.get("source_port"): pkv_fields.append(("Source Port", payload_kv["source_port"]))
++    if payload_kv.get("destination_port"): pkv_fields.append(("Destination Port", payload_kv["destination_port"]))
++    if payload_kv.get("protocol"): pkv_fields.append(("Protocol", payload_kv["protocol"]))
++    if payload_kv.get("action"): pkv_fields.append(("Action", payload_kv["action"]))
++    if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
++    discovered = pkv_fields + _discover_extra_fields(events)
++    _seen_lbl = set()
++    discovered = [(l, v) for (l, v) in discovered if not (l in _seen_lbl or _seen_lbl.add(l))]
+     for label, value in discovered:
+         key = f"x_{label.lower().replace(' ', '_')}"
+         optional_fields.append((key, label))
+@@ -734,6 +744,55 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
+     return report_dict
+ 
+ 
++def _parse_payload_kv(events: list[dict]) -> dict:
++    """Parse key=value / LEEF attributes and 'Key: Value' pairs out of raw event
++    payloads. Returns a normalised dict of common SOC fields (source_ip,
++    destination_ip, source_port, destination_port, protocol, action, rule_name,
++    username). LEEF example:
++      LEEF:2.0|Check Point|VPN-1|1.0|Accept|src=1.2.3.4 dst=5.6.7.8 srcPort=443 ...
++    """
++    import re as _re
++    text = " ".join(
++        [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
++    )
++    if not text:
++        return {}
++    # Collect key=value tokens (values run until the next ' key=' or end).
++    kv: dict[str, str] = {}
++    for m in _re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)=([^=]*?)(?=\s+[A-Za-z_][A-Za-z0-9_.]*=|$)", text):
++        k = m.group(1).strip().lower()
++        v = m.group(2).strip().strip('"').strip("'")
++        if v and k not in kv:
++            kv[k] = v
++    # Also capture 'Key: Value' style (Windows / generic).
++    for m in _re.finditer(r"([A-Za-z][A-Za-z _]{1,30}?)\s*:\s*([^\n\r]+?)(?:\s{2,}|$)", text):
++        k = m.group(1).strip().lower().replace(" ", "_")
++        v = m.group(2).strip()
++        if v and k not in kv:
++            kv[k] = v
++
++    def pick(*names):
++        for n in names:
++            if kv.get(n):
++                return kv[n]
++        return None
++
++    proto = pick("proto", "protocol", "protocolname")
++    if proto and proto.isdigit():
++        proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(proto, proto)
++    out = {
++        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip"),
++        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost", "origin"),
++        "source_port": pick("srcport", "source_port", "sport", "spt"),
++        "destination_port": pick("dstport", "destination_port", "dport", "dpt", "service"),
++        "protocol": proto,
++        "action": pick("action", "rule_action", "act"),
++        "rule_name": pick("rule_name", "rulename", "rule"),
++        "username": pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
++    }
++    return {k: v for k, v in out.items() if v}
++
++
+ def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:
+     """Scan event payloads and pull out additional analyst-useful fields.
+     Returns [(label, value), ...] with de-duped values."""
+diff --git a/frontend/src/components/MsspReport.jsx b/frontend/src/components/MsspReport.jsx
+index 0822bc8..a46a057 100644
+--- a/frontend/src/components/MsspReport.jsx
++++ b/frontend/src/components/MsspReport.jsx
+@@ -57,6 +57,13 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
+     return raw.filter(([k]) => EDITABLE_KEYS.has(k));
+   }, [report]);
+ 
++  // Read-only view shows ALL report fields, including dynamically-discovered
++  // payload fields (Source Port, Protocol, Action, Rule Name, SQL Command, …).
++  const allFields = useMemo(
++    () => ((report?.fields && report.fields.length) ? report.fields : DEFAULT_FIELDS),
++    [report],
++  );
++
+   if (!report) {
+     return (
+       <div className="tactical-panel p-6 text-sm" style={{ color: "var(--tg-text-muted)" }} data-testid={`${testId}-empty`}>
+@@ -130,6 +137,15 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
+           )}
+         </div>
+         <div className="flex items-center gap-2">
++          {report.generated_by && !editing && (
++            <span className="tg-model" data-testid={`${testId}-source`} title={report.generated_by}>
++              {report.generated_by.startsWith("kb-template")
++                ? `KB Template${report.kb_template_score ? ` · ${report.kb_template_score}%` : ""}`
++                : report.generated_by.startsWith("llm")
++                  ? "Local LLM"
++                  : "Rule Engine"}
++            </span>
++          )}
+           {report.verdict && !editing && (
+             <span className="tg-sev" data-testid={`${testId}-verdict`}
+                   style={{ background: verdictColor.bg, borderColor: verdictColor.border, color: verdictColor.fg }}>
+@@ -160,11 +176,11 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
+       </div>
+ 
+       <div className="font-mono text-sm space-y-2" style={{ color: "var(--tg-text)" }}>
+-        {editableFields.map(([k, label]) => {
++        {(editing ? editableFields : allFields).map(([k, label]) => {
+           const val = editing ? draft.fields[k] : report[k];
+           const clickable = !editing && !!onFieldClick && val;
+           return (
+-            <div key={k} className="grid grid-cols-[180px_1fr] gap-3 items-center" data-testid={`${testId}-${k}`}>
++            <div key={k} className="grid grid-cols-[180px_1fr] gap-3 items-start" data-testid={`${testId}-${k}`}>
+               <div style={{ color: "var(--tg-text-muted)" }}>{label}:</div>
+               {editing ? (
+                 <input value={val || ""} onChange={(e) => setDraft({ ...draft, fields: { ...draft.fields, [k]: e.target.value } })}
+@@ -173,12 +189,12 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
+                        style={{ background: "var(--tg-surface-2)", border: "1px solid var(--tg-border)", color: "var(--tg-text)" }} />
+               ) : clickable ? (
+                 <button onClick={() => onFieldClick(label, val)} data-testid={`${testId}-${k}-jump`}
+-                        className="text-left break-words hover:underline decoration-dotted"
++                        className="text-left break-all hover:underline decoration-dotted"
+                         style={{ color: "var(--tg-text)" }}>
+                   {val}
+                 </button>
+               ) : (
+-                <div className="break-words" style={{ color: "var(--tg-text)" }}>
++                <div className="break-all whitespace-pre-wrap" style={{ color: "var(--tg-text)" }}>
+                   {val ?? <span style={{ color: "var(--tg-text-hint)" }}>—</span>}
+                 </div>
+               )}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+index 06bed50..fcc126c 100644
+--- a/frontend/src/index.css
++++ b/frontend/src/index.css
+@@ -339,6 +339,14 @@ html.dark {
+     border: 1px solid var(--tg-border);
+     border-radius: 8px;
+     color: var(--tg-text);
++    padding: 10px 12px;
++    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
++    font-size: 12px;
++    line-height: 1.5;
++    white-space: pre-wrap;
++    word-break: break-word;
++    overflow-wrap: anywhere;
++    max-width: 100%;
+ }
+ .payload-viewer .ioc-ipv4 { color: var(--tg-red); font-weight: 600; }
+ .payload-viewer .ioc-ipv4-priv { color: var(--tg-indigo); }
+diff --git a/frontend/src/pages/KnowledgeBasePage.jsx b/frontend/src/pages/KnowledgeBasePage.jsx
+index 05505d7..eb2f381 100644
+--- a/frontend/src/pages/KnowledgeBasePage.jsx
++++ b/frontend/src/pages/KnowledgeBasePage.jsx
+@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
+ import api from "@/lib/api";
+ import { useClients } from "@/lib/clients";
+ import { toast } from "sonner";
+-import { Upload, Trash2, FileText, Database, Search, RefreshCw } from "lucide-react";
++import { Upload, Trash2, FileText, Database, Search, RefreshCw, PlusCircle, PenLine } from "lucide-react";
+ 
+ const KB_TYPES = [
+   { value: "network_hierarchy", label: "Network Hierarchy" },
+@@ -12,8 +12,11 @@ const KB_TYPES = [
+   { value: "playbook", label: "Playbooks" },
+ ];
+ 
++const ALL_SCOPE = "ALL";
++
+ export default function KnowledgeBasePage() {
+   const { activeClientId, clients } = useClients();
++  const [scope, setScope] = useState(activeClientId || "");
+   const [entries, setEntries] = useState([]);
+   const [kbStatus, setKbStatus] = useState(null);
+   const [uploading, setUploading] = useState(false);
+@@ -22,17 +25,23 @@ export default function KnowledgeBasePage() {
+   const [searchQ, setSearchQ] = useState("");
+   const [searching, setSearching] = useState(false);
+   const [searchResults, setSearchResults] = useState(null);
++  // Manual "add historical data" form
++  const [manual, setManual] = useState({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
++  const [savingManual, setSavingManual] = useState(false);
++
++  // Keep scope in sync when the global active client first resolves.
++  useEffect(() => { if (!scope && activeClientId) setScope(activeClientId); /* eslint-disable-next-line */ }, [activeClientId]);
+ 
+   const load = async () => {
+-    if (!activeClientId) return;
++    if (!scope) return;
+     const [r, s] = await Promise.all([
+-      api.get(`/kb?client_id=${activeClientId}`),
++      api.get(`/kb?client_id=${scope}`),
+       api.get("/kb/status"),
+     ]);
+     setEntries(r.data || []);
+     setKbStatus(s.data);
+   };
+-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [activeClientId]);
++  useEffect(() => { load(); /* eslint-disable-next-line */ }, [scope]);
+ 
+   // Auto-poll while any entry is still PROCESSING
+   useEffect(() => {
+@@ -49,7 +58,7 @@ export default function KnowledgeBasePage() {
+     setUploading(true);
+     try {
+       const fd = new FormData();
+-      fd.append("client_id", activeClientId);
++      fd.append("client_id", scope);
+       fd.append("kb_type", kbType);
+       fd.append("file", file);
+       await api.post("/kb/upload", fd, {
+@@ -82,31 +91,108 @@ export default function KnowledgeBasePage() {
+     } catch (e) { toast.error(e?.response?.data?.detail || "Retry failed"); }
+   };
+ 
++  const addManual = async (e) => {
++    e.preventDefault();
++    if (!manual.alert_name.trim() || !manual.analysis.trim())
++      return toast.error("Alert name and analysis are required");
++    setSavingManual(true);
++    try {
++      await api.post("/kb/manual", {
++        client_id: scope,
++        alert_name: manual.alert_name.trim(),
++        analysis: manual.analysis.trim(),
++        verdict: manual.verdict || null,
++        recommendations: manual.recommendations.split("\n").map((s) => s.trim()).filter(Boolean),
++        kb_type: "historical_incident",
++      });
++      toast.success("Historical KB entry added");
++      setManual({ alert_name: "", analysis: "", verdict: "", recommendations: "" });
++      load();
++    } catch (e) {
++      toast.error(e?.response?.data?.detail || "Failed to add entry");
++    } finally { setSavingManual(false); }
++  };
++
+   const runSearch = async (e) => {
+     e?.preventDefault();
+     if (!searchQ.trim()) return;
+     setSearching(true);
+     try {
+       const r = await api.post("/kb/search", {
+-        client_id: activeClientId, query: searchQ, n_results: 8,
++        client_id: scope, query: searchQ, n_results: 8,
+       });
+       setSearchResults(r.data);
+     } catch (e) { toast.error(e?.response?.data?.detail || "Search failed"); }
+     finally { setSearching(false); }
+   };
+ 
+-  const client = clients.find((c) => c.id === activeClientId);
++  const scopeOptions = [...clients.map((c) => ({ id: c.id, name: c.name })), { id: ALL_SCOPE, name: "All Tenants (global)" }];
++  const scopeLabel = scope === ALL_SCOPE ? "All Tenants" : (clients.find((c) => c.id === scope)?.name || "—");
+ 
+   return (
+     <div className="space-y-5" data-testid="kb-page">
+-      <div>
+-        <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">// TENANT KNOWLEDGE</div>
+-        <h1 className="font-display text-3xl mt-1">Knowledge Base</h1>
+-        <p className="text-neutral-400 text-sm mt-1">
+-          Per-tenant RAG corpus for <span className="text-cyan-400 font-mono">{client?.name}</span>. Uploaded documents are chunked and embedded for retrieval during AI investigation.
+-        </p>
++      <div className="flex items-start justify-between gap-4 flex-wrap">
++        <div>
++          <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">// TENANT KNOWLEDGE</div>
++          <h1 className="font-display text-3xl mt-1">Knowledge Base</h1>
++          <p className="text-neutral-400 text-sm mt-1">
++            RAG corpus for <span className="text-cyan-400 font-mono">{scopeLabel}</span>. Documents & manual entries are embedded for retrieval during AI investigation.
++          </p>
++        </div>
++        <div data-testid="kb-scope">
++          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">KB Scope</div>
++          <select value={scope} onChange={(e) => setScope(e.target.value)} data-testid="kb-scope-select"
++            className="bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2 min-w-[220px]">
++            {scopeOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
++          </select>
++        </div>
+       </div>
+ 
++      {/* Add historical data manually */}
++      <form onSubmit={addManual} className="tactical-panel p-5 space-y-3" data-testid="kb-manual-form">
++        <div className="flex items-center gap-2">
++          <PenLine className="w-4 h-4 text-cyan-400" strokeWidth={1.5} />
++          <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">// ADD HISTORICAL DATA (MANUAL)</div>
++        </div>
++        <p className="text-[11px] text-neutral-500 -mt-1">
++          Record a known alert's analysis once. When a future offense has the same alert name, the AI reuses this analysis as a template (swapping in the new offense's artifacts).
++        </p>
++        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
++          <div>
++            <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Alert / Rule Name *</div>
++            <input value={manual.alert_name} onChange={(e) => setManual({ ...manual, alert_name: e.target.value })} data-testid="kb-manual-name"
++              placeholder="e.g. Multiple Login Failures for Single Username"
++              className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
++          </div>
++          <div>
++            <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Verdict (optional)</div>
++            <select value={manual.verdict} onChange={(e) => setManual({ ...manual, verdict: e.target.value })} data-testid="kb-manual-verdict"
++              className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2">
++              <option value="">— none —</option>
++              <option value="TP">TP (True Positive)</option>
++              <option value="FP">FP (False Positive)</option>
++              <option value="Suspicious">Suspicious</option>
++            </select>
++          </div>
++        </div>
++        <div>
++          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Analysis *</div>
++          <textarea rows={4} value={manual.analysis} onChange={(e) => setManual({ ...manual, analysis: e.target.value })} data-testid="kb-manual-analysis"
++            placeholder="Describe the investigation & conclusion. Tip: use {source_ip}, {username}, {destination_ip}, {offense_id}, {date_time} — they get replaced with the new offense's values."
++            className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
++        </div>
++        <div>
++          <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Recommendations (one per line, optional)</div>
++          <textarea rows={2} value={manual.recommendations} onChange={(e) => setManual({ ...manual, recommendations: e.target.value })} data-testid="kb-manual-recs"
++            placeholder={"Confirm activity with {username}\nTune the detection rule if benign"}
++            className="w-full bg-[#050505] border border-[#1F1F1F] focus:border-cyan-500 focus:outline-none text-sm font-mono px-3 py-2" />
++        </div>
++        <button type="submit" disabled={savingManual} data-testid="kb-manual-submit"
++          className="bg-cyan-400 hover:bg-cyan-300 text-black px-4 py-2 text-xs font-mono uppercase tracking-widest font-bold inline-flex items-center gap-2 disabled:opacity-50">
++          <PlusCircle className="w-3.5 h-3.5" />{savingManual ? "Saving..." : "Add to Knowledge Base"}
++        </button>
++      </form>
++
+       {/* Search preview - available to any authenticated analyst or admin */}
+       <div className="tactical-panel p-4" data-testid="kb-search-preview">
+         <div className="flex items-baseline justify-between mb-3">
+@@ -206,7 +292,12 @@ export default function KnowledgeBasePage() {
+                 }[e.status || "READY"] || "border-neutral-600 text-neutral-400";
+                 return (
+                 <tr key={e.id} className="border-b border-[#0F0F0F] hover:bg-[#111]" data-testid={`kb-row-${e.id}`}>
+-                  <td className="px-3 py-2 text-cyan-400 text-xs uppercase">{e.kb_type}</td>
++                  <td className="px-3 py-2 text-cyan-400 text-xs uppercase">
++                    {e.kb_type}
++                    {e.entry_kind === "manual" && (
++                      <span className="ml-2 inline-block px-1.5 py-0.5 text-[9px] border border-cyan-500/40 text-cyan-300 tracking-widest">MANUAL{e.verdict ? ` · ${e.verdict}` : ""}</span>
++                    )}
++                  </td>
+                   <td className="px-3 py-2 text-neutral-100 inline-flex items-center gap-2"><FileText className="w-3 h-3 text-neutral-500" />{e.filename}</td>
+                   <td className="px-3 py-2">
+                     <span data-testid={`kb-status-${e.id}`}
+diff --git a/frontend/src/pages/OffenseDetailPage.jsx b/frontend/src/pages/OffenseDetailPage.jsx
+index f75a69e..c687a06 100644
+--- a/frontend/src/pages/OffenseDetailPage.jsx
++++ b/frontend/src/pages/OffenseDetailPage.jsx
+@@ -8,7 +8,7 @@ import { PayloadViewer } from "@/components/PayloadViewer";
+ import { MsspReport } from "@/components/MsspReport";
+ import { LifecycleActions } from "@/components/LifecycleActions";
+ import { toast } from "sonner";
+-import { Brain, Check, X, ArrowUpRight, Ban, Ticket as TicketIcon, Loader2, ArrowLeft, Layers } from "lucide-react";
++import { Brain, Check, X, ArrowUpRight, Ban, Ticket as TicketIcon, Loader2, ArrowLeft, Layers, Download } from "lucide-react";
+ 
+ const TABS = [
+   "summary", "mssp_report", "timeline", "events", "payload", "artifacts", "mitre", "similar", "kb", "recommendations",
+@@ -23,6 +23,7 @@ export default function OffenseDetailPage() {
+   const [investigating, setInvestigating] = useState(false);
+   const [creatingTicket, setCreatingTicket] = useState(false);
+   const [highlight, setHighlight] = useState(null);
++  const [llmPending, setLlmPending] = useState(false);
+ 
+   const load = async () => {
+     setLoading(true);
+@@ -31,12 +32,50 @@ export default function OffenseDetailPage() {
+   };
+   useEffect(() => { load(); }, [id]);
+ 
++  // Poll while the local LLM is refining the report in the background.
++  useEffect(() => {
++    const status = off?.ai_analysis?.llm_status;
++    setLlmPending(status === "pending");
++    if (status !== "pending") return;
++    const t = setInterval(async () => {
++      try {
++        const r = await api.get(`/offenses/${id}`);
++        setOff(r.data);
++        const s = r.data?.ai_analysis?.llm_status;
++        if (s !== "pending") {
++          if (s === "done") toast.success("Local LLM finished refining the report");
++          else if (s === "failed") toast.message("LLM unavailable — showing KB/rule analysis");
++        }
++      } catch (e) {}
++    }, 5000);
++    return () => clearInterval(t);
++    /* eslint-disable-next-line */
++  }, [off?.ai_analysis?.llm_status, id]);
++
++  const exportOffense = () => {
++    try {
++      const blob = new Blob([JSON.stringify({ export_version: 1, exported_at: new Date().toISOString(), offenses: [off] }, null, 2)], { type: "application/json" });
++      const url = URL.createObjectURL(blob);
++      const a = document.createElement("a");
++      a.href = url;
++      a.download = `offense-${off.qradar_offense_id || off.id.slice(0, 8)}.json`;
++      document.body.appendChild(a);
++      a.click();
++      a.remove();
++      URL.revokeObjectURL(url);
++      toast.success("Offense exported with events & payloads");
++    } catch (e) { toast.error("Export failed"); }
++  };
++
+   const investigate = async () => {
+     setInvestigating(true);
+     try {
+-      const r = await api.post(`/offenses/${id}/investigate`);
++      const r = await api.post(`/offenses/${id}/investigate`, {}, { timeout: 240000 });
+       setOff(r.data);
+-      toast.success(`AI investigation complete. Risk: ${r.data.risk_score}/100`);
++      if (r.data?.ai_analysis?.llm_status === "pending")
++        toast.success("Analysis ready — local LLM (Qwen) is refining it in the background…");
++      else
++        toast.success(`AI investigation complete. Risk: ${r.data.risk_score}/100`);
+       setTab("mssp_report");
+     } catch (e) { toast.error(e?.response?.data?.detail || "Investigation failed"); }
+     finally { setInvestigating(false); }
+@@ -111,6 +150,13 @@ export default function OffenseDetailPage() {
+           {investigating ? "Analyzing..." : off.ai_analysis ? "Re-run AI Analysis" : "Run AI Investigation"}
+         </button>
+         <div className="flex-1" />
++        <button
++          onClick={exportOffense}
++          data-testid="btn-export-offense"
++          className="border border-[#1F1F1F] hover:border-cyan-500 hover:text-cyan-400 px-3 py-2 text-xs font-mono uppercase tracking-widest text-neutral-300 inline-flex items-center gap-2"
++        >
++          <Download className="w-3.5 h-3.5" /> Export JSON
++        </button>
+         <ActionBtn testId="btn-approve" onClick={() => doAction("approve")} icon={Check} label="Approve" color="emerald" />
+         <ActionBtn testId="btn-reject" onClick={() => doAction("reject")} icon={X} label="Reject" color="rose" />
+         <ActionBtn testId="btn-escalate" onClick={() => doAction("escalate")} icon={ArrowUpRight} label="Escalate L3" color="amber" />
+@@ -138,6 +184,12 @@ export default function OffenseDetailPage() {
+ 
+       {/* Tab content */}
+       <div className="fade-in-up">
++        {llmPending && (
++          <div className="mb-3 flex items-center gap-2 border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-mono text-cyan-300" data-testid="llm-pending-banner">
++            <Loader2 className="w-3.5 h-3.5 animate-spin" />
++            Local LLM (Qwen) is refining this report in the background — showing KB/rule analysis meanwhile. This updates automatically.
++          </div>
++        )}
+         {tab === "summary" && <SummaryTab off={off} analysis={analysis} />}
+         {tab === "mssp_report" && <MsspReport report={analysis.mssp_report} testId="offense-mssp-report"
+             offenseId={off.id}
+diff --git a/frontend/src/pages/OffensesPage.jsx b/frontend/src/pages/OffensesPage.jsx
+index 22573ee..5a9b1d2 100644
+--- a/frontend/src/pages/OffensesPage.jsx
++++ b/frontend/src/pages/OffensesPage.jsx
+@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
+ import api from "@/lib/api";
+ import { useClients } from "@/lib/clients";
+ import { SeverityChip, StatusChip } from "@/components/SeverityChip";
+-import { Search, RefreshCw, X as XIcon } from "lucide-react";
++import { Search, RefreshCw, X as XIcon, Download } from "lucide-react";
+ import { toast } from "sonner";
+ 
+ const STATUS_OPTIONS = ["OPEN", "INVESTIGATING", "PENDING_APPROVAL", "ESCALATED", "RESOLVED", "CLOSED"];
+@@ -20,6 +20,29 @@ export default function OffensesPage() {
+   const [selected, setSelected] = useState(() => new Set());
+   const [closeModal, setCloseModal] = useState(null); // { offenseIds: string[], bulk: boolean }
+   const [bulkStatus, setBulkStatus] = useState("");
++  const [exporting, setExporting] = useState(false);
++
++  const exportOffenses = async () => {
++    if (!activeClientId) return toast.error("Select a client first");
++    setExporting(true);
++    try {
++      const params = new URLSearchParams({ client_id: activeClientId });
++      if (selected.size) params.set("ids", Array.from(selected).join(","));
++      const r = await api.get(`/offenses/export?${params}`);
++      const blob = new Blob([JSON.stringify(r.data, null, 2)], { type: "application/json" });
++      const url = URL.createObjectURL(blob);
++      const a = document.createElement("a");
++      a.href = url;
++      a.download = `offenses-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.json`;
++      document.body.appendChild(a);
++      a.click();
++      a.remove();
++      URL.revokeObjectURL(url);
++      toast.success(`Exported ${r.data.count} offense(s) with events & payloads`);
++    } catch (e) {
++      toast.error(e?.response?.data?.detail || "Export failed");
++    } finally { setExporting(false); }
++  };
+ 
+   const load = async () => {
+     if (!activeClientId) return;
+@@ -104,6 +127,14 @@ export default function OffensesPage() {
+           <h1 className="font-display text-3xl mt-1">Offenses</h1>
+         </div>
+         <div className="flex items-center gap-2">
++          <button
++            onClick={exportOffenses}
++            disabled={exporting}
++            data-testid="btn-export-offenses"
++            className="border border-[#1F1F1F] hover:border-cyan-500 hover:text-cyan-400 px-3 py-1.5 text-[11px] font-mono uppercase tracking-widest text-neutral-300 inline-flex items-center gap-2"
++          >
++            <Download className="w-3 h-3" /> {exporting ? "Exporting..." : (selected.size ? `Export (${selected.size})` : "Export JSON")}
++          </button>
+           <button
+             onClick={syncFromQRadar}
+             disabled={syncing}
+diff --git a/frontend/src/pages/SettingsPage.jsx b/frontend/src/pages/SettingsPage.jsx
+index 8382303..6eb527c 100644
+--- a/frontend/src/pages/SettingsPage.jsx
++++ b/frontend/src/pages/SettingsPage.jsx
+@@ -110,6 +110,25 @@ export default function SettingsPage() {
+           {tab === "llm" && (
+             <div className="space-y-4" data-testid="llm-settings">
+               <SectionHeader title="Local LLM (Hugging Face)" hint="Runs offline on CPU. Model downloads on first use." />
++              <div>
++                <div className="text-[10px] font-mono uppercase text-neutral-500 mb-1">Analysis Engine</div>
++                <div className="grid grid-cols-2 gap-3" data-testid="llm-analysis-mode">
++                  {[
++                    { value: "kb", label: "KB Template", desc: "Deterministic. Matches the alert to a KB entry and reuses its analysis with this offense's artifacts. Instant." },
++                    { value: "llm", label: "Local LLM (Qwen)", desc: "Qwen generates the analysis from the KB reference. Real local inference on CPU — slower." },
++                  ].map((m) => {
++                    const active = (data.llm.analysis_mode || "kb") === m.value;
++                    return (
++                      <button key={m.value} type="button" data-testid={`llm-mode-${m.value}`}
++                        onClick={() => setData({ ...data, llm: { ...data.llm, analysis_mode: m.value } })}
++                        className={`text-left p-3 border transition-colors ${active ? "border-cyan-500 bg-cyan-500/10" : "border-[#1F1F1F] hover:border-cyan-500/50 bg-[#050505]"}`}>
++                        <div className={`text-sm font-mono font-bold ${active ? "text-cyan-300" : "text-neutral-200"}`}>{m.label}{active ? " ●" : ""}</div>
++                        <div className="text-[11px] text-neutral-500 mt-1 leading-relaxed">{m.desc}</div>
++                      </button>
++                    );
++                  })}
++                </div>
++              </div>
+               <div className="grid grid-cols-2 gap-4">
+                 <SelectField label="Provider" val={data.llm.provider} on={(v) => setData({ ...data, llm: { ...data.llm, provider: v } })} testId="llm-provider"
+                   options={[{ value: "local", label: "HuggingFace (local)" }, { value: "ollama", label: "Ollama endpoint" }, { value: "huggingface", label: "HF Inference API" }]} />
+@@ -121,9 +140,8 @@ export default function SettingsPage() {
+                 <TextField label="Max Tokens" val={data.llm.max_tokens} on={(v) => setData({ ...data, llm: { ...data.llm, max_tokens: parseInt(v || "0") } })} testId="llm-max" />
+                 <TextField label="Temperature" val={data.llm.temperature} on={(v) => setData({ ...data, llm: { ...data.llm, temperature: parseFloat(v || "0") } })} testId="llm-temp" />
+               </div>
+-              <Toggle label="Enable local LLM narrative augmentation" checked={data.llm.enable_llm} onChange={(v) => setData({ ...data, llm: { ...data.llm, enable_llm: v } })} testId="llm-enable" />
+               <div className="text-[11px] font-mono text-neutral-500 border-l-2 border-cyan-500 pl-3 py-1">
+-                Rule-based SOC engine always runs. LLM augments the executive summary when enabled — first call may take several minutes to download the model.
++                The rule-based SOC engine always runs first. In <span className="text-cyan-400">KB Template</span> mode the report reuses a matching Knowledge Base entry's analysis (artifacts swapped for the current offense). In <span className="text-cyan-400">Local LLM</span> mode Qwen ({data.llm.model_name || "Qwen/Qwen2.5-0.5B-Instruct"}) generates it from that reference — the first call downloads the model and may take a few minutes.
+               </div>
+             </div>
+           )}
