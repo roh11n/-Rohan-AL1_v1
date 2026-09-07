@@ -116,53 +116,39 @@ def _build_fieldmap(base: dict, offense: dict, vt: dict | None = None) -> dict:
     return {k: v for k, v in fm.items() if v}
 
 
+def _to_bullets(text, fm: dict) -> list[str]:
+    """Fill placeholders then split a paragraph/multiline field into clean bullets."""
+    if not text:
+        return []
+    filled = _fill(text, fm)
+    parts = re.split(r"(?:\r?\n|•|(?<=[.;])\s+)", filled)
+    return [p.strip(" -*•\t") for p in parts if p and p.strip(" -*•\t")][:8]
+
+
 def build_kb_template_report(offense: dict, events: list[dict], kb_entry: dict,
                              base_report: dict, score: int, vt: dict | None = None) -> dict:
-    """Populate the KB entry's sections (Analysis / IOC Enrichment / Impact /
-    Recommendations) with this offense's fields (from offense + payload) and,
-    when enabled, live VirusTotal enrichment. Fully dynamic — no per-use-case code."""
+    """Populate the KB entry's sections (Analysis / Impact / Recommendations /
+    IOC Enrichment) with this offense's fields (from offense + payload) and, when
+    enabled, live VirusTotal enrichment. Fully dynamic — no per-use-case code.
+    Sections are returned as separate structured fields the UI renders explicitly."""
     base = dict(base_report or {})
     fm = _build_fieldmap(base_report, offense, vt)
 
-    lines = []
-    n = [1]
+    analysis = _to_bullets(kb_entry.get("analysis"), fm)
+    base["analysis_lines"] = [{"n": i, "text": t} for i, t in enumerate(analysis, 1)]
+    base["impact_lines"] = _to_bullets(kb_entry.get("impact"), fm)
 
-    def add(text):
-        lines.append({"n": n[0], "text": text})
-        n[0] += 1
-
-    def section(title, body):
-        if not body:
-            return
-        add(f"[{title}]")
-        for seg in re.split(r"(?:\r?\n)+", _fill(body, fm)):
-            seg = seg.strip()
-            if seg:
-                add(seg)
-
-    add(f"Matched knowledge-base template '{kb_entry.get('alert_name')}' ({score}% name match). "
-        f"Sections are populated from this offense's fields.")
-    section("Analysis", kb_entry.get("analysis"))
-    if vt and vt.get("text"):
-        section("IOC Enrichment", vt["text"])
-    elif kb_entry.get("ioc_enrichment"):
-        add("[IOC Enrichment]")
-        add("VirusTotal enrichment unavailable (no public IP matched or VT key not configured).")
-    section("Impact", kb_entry.get("impact"))
-
-    recs = [_fill(r, fm) for r in (kb_entry.get("recommendations") or [])]
-    if recs:
-        add("[Recommendations]")
-        for r in recs:
-            add(r)
-
-    base["analysis_lines"] = lines
-    if kb_entry.get("verdict"):
-        base["verdict"] = kb_entry["verdict"]
-    base["verdict_reason"] = base.get("verdict_reason") or f"Consistent with knowledge-base entry '{kb_entry.get('alert_name')}'."
+    recs = [_fill(r, fm) for r in (kb_entry.get("recommendations") or []) if r]
+    if len(recs) == 1:  # single paragraph -> split into bullets
+        recs = _to_bullets(recs[0], fm) or recs
     if recs:
         base["recommendations"] = recs
         base["recommendation_text"] = recs[0]
+
+    if kb_entry.get("verdict"):
+        base["verdict"] = kb_entry["verdict"]
+    base["verdict_reason"] = (base.get("verdict_reason")
+                              or f"Consistent with knowledge-base use case '{kb_entry.get('alert_name')}'.")
     if vt:
         base["ioc_enrichment"] = vt
     base["generated_by"] = f"kb-template:{kb_entry.get('alert_name')}"

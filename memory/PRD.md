@@ -40,3 +40,14 @@ See /app/memory/test_credentials.md.
 ## Backlog / Next
 - P2: fix the 3 cosmetic issues above if moving beyond strict as-is.
 - P2: optionally point Settings -> Model Name at a larger Qwen if more RAM/disk available (3B needs ~6GB disk for weights; current disk ~2GB free).
+
+## Update 2026-06 — SOC L1 analysis quality upgrade
+Fixed 4 user-reported flaws so reports read like a real MSSP L1 analyst:
+1. Analysis now technical bullet points, grounded in offense fields/events/payload, with NO historical/other-offense comparison (llm_engine.build_llm_mssp_report_oneshot rewritten to a plain-text sectioned prompt + tolerant parser; small-model friendly).
+2. Log source = the real onboarded device/tool from events (Zscaler/CrowdStrike/etc.); QRadar "Custom Rule Engine" (CRE) is skipped, LEEF vendor/product fallback (soc_engine._extract_log_source). Startup migration recomputes stale CRE log sources on pre-fix reports.
+3. KB learning: kb.csv (Tenant Name,id,Ticket ID,occurred,name,severity,AnalystSeverity,Ticket Number,closeReason,closeNotes,ITSM_Analysis,ITSM_Impact,ITSM_Recommendations) imported -> vector DB; the matched use-case's analysis/impact/recommendations are fed to the LLM as reference and used to backfill any empty section (report always complete).
+4. Report sections now ordered Analysis -> Impact -> Recommendations -> IOC Enrichment (VirusTotal only) -> Verdict. IOC Enrichment runs live via VirusTotal for any external IP (server._vt_ioc_enrichment) in both KB and LLM modes. Frontend MsspReport.jsx renders Impact + IOC Enrichment sections.
+
+Verified: testing agent iteration_2.json 100% frontend + 2/2 backend pytest. Example: ACME CTI-outbound offense -> source=llm, real log source (Zscaler NSS), clean technical bullets, VT enrichment (Cloudflare/US/3 malicious), verdict TP.
+
+Known non-blocking (pre-existing, not in this bug report): risk-donut overlaps Create Ticket button; <span>-in-<option> hydration warning.

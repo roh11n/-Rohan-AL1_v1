@@ -508,6 +508,37 @@ def _extract_field(events: list[dict], key: str):
     return None
 
 
+def _is_cre_source(name) -> bool:
+    """QRadar 'Custom Rule Engine' / CRE pseudo log-source — never a real onboarded source."""
+    return bool(re.search(r"(?i)custom\s*rule\s*engine|\bCRE\b|rule\s*engine", str(name or "")))
+
+
+def _leef_source(events: list[dict]):
+    """Derive vendor/product from a LEEF header (LEEF:1.0|Vendor|Product|...)."""
+    for e in events or []:
+        for f in ("payload", "decoded_payload"):
+            m = re.search(r"LEEF:\d+\.\d+\|([^|]+)\|([^|]+)\|", e.get(f) or "")
+            if m:
+                return f"{m.group(1).strip()} {m.group(2).strip()}".strip()
+    return None
+
+
+def _extract_log_source(events: list[dict]):
+    """Pick the REAL onboarded log source that generated the events, skipping QRadar's
+    Custom Rule Engine (CRE) pseudo-source. Falls back to LEEF-derived vendor/product."""
+    real, cre = [], []
+    for e in events or []:
+        for key in ("log_source", "log_source_name", "logsourcename",
+                    "device", "devicename", "log_source_type", "device_product"):
+            v = e.get(key)
+            if v:
+                (cre if _is_cre_source(v) else real).append(str(v))
+                break
+    if real:
+        return real[0]
+    return _leef_source(events)  # never return the CRE pseudo-source
+
+
 def _scan_payload_regex(events: list[dict], pattern: str, group: int = 0):
     import re as _re
     for e in events or []:
@@ -624,11 +655,14 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if event_id and (not event_name or event_name.lower().startswith("event")):
         event_name = WINDOWS_EVENT_NAMES.get(str(event_id), event_name)
 
-    log_source_name = _extract_field(events, "log_source")
-    log_source_ip = _extract_field(events, "log_source_ip") or _first(offense.get("destination_ips"))
+    log_source_name = _extract_log_source(events)
     log_source_str = None
     if log_source_name:
-        log_source_str = f"{log_source_name} @ {log_source_ip}" if log_source_ip else log_source_name
+        if "@" in log_source_name or "::" in log_source_name:
+            log_source_str = log_source_name
+        else:
+            _ls_ip = _extract_field(events, "log_source_ip") or _first(offense.get("destination_ips"))
+            log_source_str = f"{log_source_name} @ {_ls_ip}" if _ls_ip else log_source_name
 
     payload_kv = _parse_payload_kv(events, offense=offense)
     custom_fields = payload_kv.pop("_custom", []) if isinstance(payload_kv.get("_custom"), list) else []

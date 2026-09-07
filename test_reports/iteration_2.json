@@ -1,0 +1,35 @@
+{
+  "summary": "Verified all 4 SOC-L1 flaw fixes via backend pytest + UI Playwright. Investigated ACME offense 8b9c7d98 (IND-UC-00316 CTI outbound) via UI: LLM report completes in ~40s, badge = 'Local LLM', Verdict = TP. All required sections rendered in order (Analysis 2 technical bullets, Impact 2 bullets, Recommendations 4 bullets, IOC Enrichment 5 lines with VirusTotal link, Verdict TP with reason). Log source shows real device 'Zscaler Nanolog Streaming Service NSS@ 172.20.2.36' — NOT 'Custom Rule Engine'. Payload-derived fields present: Source IP, Destination IP, Username, Event name, Post NAT Source IP, Domain URL (cdn.discordapp.com), Application (Discord), Content Type. Analysis text is offense-specific, contains no banned terms ('similar incident', 'historical', 'previous offense', 'compared to other'). Copy button copies full report including Analysis / Impact / Recommendation / IOC Enrichment / Verdict (1920 chars). Backend regression pytest 2/2 passed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Offense Detail header", "issues": ["Risk score SVG donut still overlaps 'Create Ticket' button on 1920px viewport (carry-over from iter 1)"]},
+      {"screen": "Layout tenant selector", "issues": ["Hydration warning persists: <span> inside <option> in ClientProvider (carry-over from iter 1) — pollutes console on every route change"]}
+    ]
+  },
+  "critical_code_review_comments": [
+    "backend/soc_engine.py _extract_log_source is correct, but the fix is only applied at investigate-time. Offenses that were investigated BEFORE the fix (e.g. 0d75ac25 initially showed 'Custom Rule Engine-331 :: cicggnep02-sh-primary') still carry stale CRE log_source in ai_analysis.mssp_report until re-investigated. Consider a one-time migration to recompute log_source for existing mssp_reports whose log_source matches the CRE pattern, so users don't see stale CRE values on pre-existing offenses.",
+    "Frontend MsspReport.jsx: Copy output uses label 'Recommendation:' (singular) while the request/user requirement uses 'Recommendations' plural. Minor wording nit — tests still pass because we asserted substring 'Recommendation'.",
+    "Layout.jsx (iter 1): <span> inside <option> hydration error still not fixed — still logs errors on every navigation."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_socpilot_investigate.py",
+    "/app/test_reports/pytest/socpilot_results.xml"
+  ],
+  "action_items": [
+    "Optional migration: recompute mssp_report.log_source for offenses where it matches the CRE pattern (so pre-fix data is cleaned up).",
+    "Optional: fix <span>-in-<option> hydration warning in Layout.jsx.",
+    "Optional: fix risk-donut overlap on Create Ticket button in offense header."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_socpilot_investigate.py (new pytest regression)"
+  ],
+  "success_rate": {"backend": "100% (2/2)", "frontend": "100% (all 8 requested checks)"},
+  "test_credentials": "admin@socpilot.ai / Admin@123",
+  "seed_data_creation": "None — used existing offense 8b9c7d98 (ACME) which has KB CTI match from prior iteration.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 4 user-reported flaws are fixed and validated: (1) analysis is technical bullets, no comparison verbiage; (2) log_source resolves to real device (Zscaler / Trend Apex / etc.) when events contain one, skipping CRE; (3) KB context flows into LLM prompt and produces on-topic Impact/Recommendations; (4) Verdict rendered as separate section at the bottom (data-testid=offense-mssp-report-verdict-reason) with TP/FP/Suspicious badge + reason. Report component testId is 'offense-mssp-report' (NOT 'mssp-report') — child testids follow pattern offense-mssp-report-*. Old offenses investigated pre-fix may still show CRE in their stored mssp_report until re-investigated (one such case observed: 0d75ac25 — re-investigate cleared it to 'Trend Apex Central @ ...')."
+}

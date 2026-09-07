@@ -30,9 +30,18 @@ const asText = (r) => {
   for (const cf of (r.custom_fields || [])) lines.push(`${cf.key}: ${cf.value ?? "—"}`);
   lines.push("Analysis:");
   for (const l of (r.analysis_lines || [])) lines.push(`${l.n}. ${l.text}`);
+  if (r.impact_lines && r.impact_lines.length) {
+    lines.push("Impact:");
+    r.impact_lines.forEach((t, i) => lines.push(`  ${i + 1}) ${t}`));
+  }
   lines.push("Recommendation:");
   const recs = r.recommendations && r.recommendations.length ? r.recommendations : (r.recommendation_text ? [r.recommendation_text] : []);
   recs.forEach((rec, i) => lines.push(`  ${i + 1}) ${rec}`));
+  if (r.ioc_enrichment && (r.ioc_enrichment.lines || []).length) {
+    lines.push("IOC Enrichment:");
+    r.ioc_enrichment.lines.forEach((t) => lines.push(`  ${t}`));
+    if (r.ioc_enrichment.vt_url) lines.push(`  ${r.ioc_enrichment.vt_url}`);
+  }
   if (r.vt_lookups && r.vt_lookups.length) {
     lines.push("VirusTotal Lookups:");
     r.vt_lookups.forEach((v) => {
@@ -314,10 +323,25 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
           )}
         </div>
 
+        {/* Impact */}
+        {(report.impact_lines && report.impact_lines.length > 0) && (
+          <div className="pt-3 mt-3" style={{ borderTop: "1px solid var(--tg-border)" }}>
+            <div className="mb-2" style={{ color: "var(--tg-text-muted)" }}>Impact:</div>
+            <ul className="space-y-1.5 pl-1" data-testid={`${testId}-impact`}>
+              {report.impact_lines.map((t, i) => (
+                <li key={i} className="leading-relaxed flex gap-2" data-testid={`${testId}-impact-${i}`} style={{ color: "var(--tg-text)" }}>
+                  <span className="shrink-0" style={{ color: "var(--tg-cyan)" }}>{i + 1})</span>
+                  <span>{t}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Recommendation */}
         <div className="pt-3 mt-3" style={{ borderTop: "1px solid var(--tg-border)" }}>
           <div className="flex items-center justify-between mb-2">
-            <div style={{ color: "var(--tg-text-muted)" }}>Recommendation:</div>
+            <div style={{ color: "var(--tg-text-muted)" }}>Recommendations:</div>
             {editing && (
               <button onClick={() => setDraft({ ...draft, recommendations: [...draft.recommendations, ""] })}
                       className="tg-btn" style={{ padding: "4px 8px" }} data-testid={`${testId}-add-rec`}>
@@ -365,6 +389,28 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
             </div>
           )}
         </div>
+
+        {/* IOC Enrichment (VirusTotal) */}
+        {report.ioc_enrichment && ((report.ioc_enrichment.lines || []).length > 0 || report.ioc_enrichment.source_ip) && (
+          <div className="pt-3 mt-3" style={{ borderTop: "1px solid var(--tg-border)" }} data-testid={`${testId}-ioc-enrichment`}>
+            <div className="mb-2" style={{ color: "var(--tg-text-muted)" }}>IOC Enrichment:</div>
+            <ul className="space-y-1.5 pl-1">
+              {(report.ioc_enrichment.lines || []).map((t, i) => (
+                <li key={i} className="leading-relaxed" data-testid={`${testId}-ioc-line-${i}`} style={{ color: "var(--tg-text)" }}>
+                  {t}
+                </li>
+              ))}
+            </ul>
+            {report.ioc_enrichment.vt_url && (
+              <a href={report.ioc_enrichment.vt_url} target="_blank" rel="noreferrer"
+                 data-testid={`${testId}-ioc-vt-link`}
+                 className="inline-block mt-2 text-xs font-mono hover:underline"
+                 style={{ color: "var(--tg-cyan)" }}>
+                VirusTotal ↗
+              </a>
+            )}
+          </div>
+        )}
 
         {/* VT lookups (read-only) */}
         {(report.vt_lookups && report.vt_lookups.length > 0) && (

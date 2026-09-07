@@ -365,6 +365,36 @@ async def _startup():
     if not await db.settings.find_one({"id": "global"}):
         await db.settings.insert_one(Settings().model_dump())
 
+    # One-time migration: fix stale 'Custom Rule Engine' (CRE) log sources on offenses
+    # that were investigated before the real-log-source fix. Recompute from the events.
+    from soc_engine import _extract_log_source, _is_cre_source, _extract_field, _first
+    stale = await db.offenses.find(
+        {"ai_analysis.mssp_report.log_source": {"$exists": True}},
+        {"_id": 0, "id": 1, "events": 1, "ai_analysis": 1, "destination_ips": 1},
+    ).to_list(2000)
+    fixed = 0
+    for off in stale:
+        rep = ((off.get("ai_analysis") or {}).get("mssp_report") or {})
+        cur = rep.get("log_source")
+        if cur and not _is_cre_source(cur):
+            continue
+        events = off.get("events") or []
+        name = _extract_log_source(events)
+        if not name:
+            continue
+        if "@" in name or "::" in name:
+            new_ls = name
+        else:
+            ip = _extract_field(events, "log_source_ip") or _first(off.get("destination_ips"))
+            new_ls = f"{name} @ {ip}" if ip else name
+        if new_ls and new_ls != cur:
+            await db.offenses.update_one(
+                {"id": off["id"]},
+                {"$set": {"ai_analysis.mssp_report.log_source": new_ls}})
+            fixed += 1
+    if fixed:
+        logger.info("Migration: recomputed real log source on %d offense report(s)", fixed)
+
 
 # ---------- Auth ----------
 @api.post("/auth/login", response_model=TokenResponse)
@@ -649,6 +679,62 @@ async def get_offense(offense_id: str, user: dict = Depends(get_current_user)):
     return doc
 
 
+def _is_public_ip(ip) -> bool:
+    return bool(ip) and not re.match(
+        r"^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fe80:|fc|fd)",
+        str(ip))
+
+
+def _pick_external_ip(base_mssp: dict, offense: dict):
+    cands = [(base_mssp or {}).get("destination_ip"), (base_mssp or {}).get("source_ip")]
+    cands += list(offense.get("source_ips") or []) + list(offense.get("destination_ips") or [])
+    for ip in cands:
+        if _is_public_ip(ip):
+            return ip
+    return None
+
+
+async def _vt_ioc_enrichment(offense: dict, base_mssp: dict, ti_cfg: dict) -> dict | None:
+    """Live VirusTotal enrichment for the offense's external IP. Returns a structured
+    IOC-Enrichment block (used by both KB-template and LLM modes) or None."""
+    if not ti_cfg or not ti_cfg.get("virustotal_enabled"):
+        return None
+    if not (ti_cfg.get("virustotal_api_keys") or ti_cfg.get("virustotal_api_key")):
+        return None
+    ip = _pick_external_ip(base_mssp, offense)
+    if not ip:
+        return None
+    from threat_intel import parse_vt_keys, vt_ip
+    keys = parse_vt_keys(ti_cfg.get("virustotal_api_keys", ""), ti_cfg.get("virustotal_api_key", ""))
+    if not keys:
+        return None
+    try:
+        r = await asyncio.get_event_loop().run_in_executor(None, vt_ip, ip, keys)
+    except Exception:
+        r = None
+    if not r:
+        return None
+    rep = f"{r.get('malicious', 0)} malicious / {r.get('suspicious', 0)} suspicious"
+    url = f"https://www.virustotal.com/gui/ip-address/{ip}"
+    lines = [
+        f"Source IP {ip} was reviewed.",
+        f"The IP belongs to {r.get('as_owner') or 'an unknown provider'}.",
+        f"Geolocation: {r.get('country') or 'Unknown'}.",
+        f"Reputation score: {rep}.",
+        "IOC References: VirusTotal",
+    ]
+    return {
+        "source_ip": ip, "ip": ip,
+        "isp_asn": r.get("as_owner"), "as_owner": r.get("as_owner"),
+        "country": r.get("country"),
+        "reputation": rep, "score": rep,
+        "malicious": r.get("malicious", 0), "suspicious": r.get("suspicious", 0),
+        "harmless": r.get("harmless", 0),
+        "vt_url": url, "url": url,
+        "lines": lines, "text": "\n".join(lines),
+    }
+
+
 @api.post("/offenses/{offense_id}/investigate")
 async def investigate_offense(offense_id: str, user: dict = Depends(require_roles(
         [UserRole.ADMIN, UserRole.SOC_MANAGER, UserRole.L1, UserRole.L2, UserRole.L3]))):
@@ -730,44 +816,17 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     base_mssp = dict(rule_engine_mssp)
     base_mssp.setdefault("generated_by", "rule-engine")
     base_source = "rule-engine"
-    # KB mode — deterministic template adaptation (instant, always available).
-    def _is_public(ip):
-        return bool(ip) and not re.match(r"^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fe80:|fc|fd)", str(ip))
 
-    async def _vt_enrich(base_mssp):
-        """Live VirusTotal IOC enrichment for the offense's external IP."""
-        if not matched_kb or not matched_kb.get("ioc_enrichment"):
-            return None
-        if not (ti_cfg.get("virustotal_enabled") and (ti_cfg.get("virustotal_api_keys") or ti_cfg.get("virustotal_api_key"))):
-            return None
-        from threat_intel import parse_vt_keys, vt_ip
-        keys = parse_vt_keys(ti_cfg.get("virustotal_api_keys", ""), ti_cfg.get("virustotal_api_key", ""))
-        ext = next((ip for ip in (base_mssp.get("destination_ip"), base_mssp.get("source_ip")) if _is_public(ip)), None)
-        if not ext or not keys:
-            return None
-        try:
-            r = await asyncio.get_event_loop().run_in_executor(None, vt_ip, ext, keys)
-        except Exception:
-            r = None
-        if not r:
-            return None
-        url = f"https://www.virustotal.com/gui/ip-address/{ext}"
-        score = f"{r.get('malicious', 0)} malicious / {r.get('suspicious', 0)} suspicious"
-        return {
-            "ip": ext, "as_owner": r.get("as_owner"), "country": r.get("country"),
-            "score": score, "url": url,
-            "text": (f"We reviewed IP {ext} against VirusTotal. It belongs to "
-                     f"{r.get('as_owner') or 'an unknown provider'} and is geolocated in "
-                     f"{r.get('country') or 'an unknown country'}. Reputation: {score}. "
-                     f"IOC Reference (VirusTotal): {url}"),
-        }
+    # Live VirusTotal IOC enrichment (any external IP) — used by both KB and LLM modes.
+    vt_ioc = await _vt_ioc_enrichment(doc, base_mssp, ti_cfg)
 
     if matched_kb:
-        vt_enrich = await _vt_enrich(base_mssp)
         analysis["mssp_report"] = kb_template.build_kb_template_report(
-            doc, doc.get("events") or [], matched_kb, base_mssp, match_score, vt=vt_enrich)
+            doc, doc.get("events") or [], matched_kb, base_mssp, match_score, vt=vt_ioc)
         analysis["mssp_report_source"] = "kb-template"
     else:
+        if vt_ioc:
+            base_mssp["ioc_enrichment"] = vt_ioc
         analysis["mssp_report"] = base_mssp
         analysis["mssp_report_source"] = base_source
     # exceeds the ingress request window). The response returns immediately with
@@ -776,6 +835,8 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     if schedule_llm:
         analysis["llm_status"] = "pending"
         analysis["mssp_report"]["llm_status"] = "pending"
+        if vt_ioc:
+            analysis["mssp_report"]["ioc_enrichment"] = vt_ioc
         llm_kb = list(kb_matches)
         if matched_kb:
             llm_kb.insert(0, {
@@ -803,23 +864,30 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
         model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-0.5B-Instruct"
         timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 240)
         temperature = float(llm_cfg.get("temperature") or 0.3)
+        # Base for the LLM = the report just built (KB-template when a use-case matched,
+        # else rule-engine). The model refines it and drives the verdict; empty sections
+        # are backfilled from this technical base so the report is always complete.
+        llm_base = dict(analysis["mssp_report"])
+        llm_base.pop("llm_status", None)
         asyncio.create_task(_run_llm_report_bg(
-            offense_id, doc, doc.get("events") or [], llm_kb, rule_engine_mssp,
-            model_name, temperature, max(300, timeout)))
+            offense_id, doc, doc.get("events") or [], llm_kb, llm_base,
+            model_name, temperature, max(300, timeout), vt_ioc))
     new_doc = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
     return new_doc
 
 
 async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: list,
                              rule_engine_mssp: dict, model_name: str,
-                             temperature: float, timeout: int):
+                             temperature: float, timeout: int,
+                             ioc_enrichment: dict | None = None):
     """Background: run the local Qwen one-shot and patch the offense's MSSP report."""
     try:
         import llm_engine  # heavy transformers stack — lazy
         loop = asyncio.get_event_loop()
         llm_mssp = await loop.run_in_executor(
             None, llm_engine.build_llm_mssp_report_oneshot,
-            doc, events, llm_kb, rule_engine_mssp, model_name, temperature, timeout)
+            doc, events, llm_kb, rule_engine_mssp, model_name, temperature, timeout,
+            ioc_enrichment)
         cur = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
         if not cur:
             return
