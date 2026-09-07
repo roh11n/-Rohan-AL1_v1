@@ -579,6 +579,25 @@ async def list_offenses(client_id: Optional[str] = None, severity: Optional[str]
     return docs
 
 
+@api.get("/offenses/export")
+async def export_offenses(client_id: Optional[str] = None, ids: Optional[str] = None,
+                          user: dict = Depends(get_current_user)):
+    """Export FULL offenses (including events + raw payloads) as JSON so they can
+    be copied/shared for debugging or re-imported. Respects tenant access."""
+    q = _tenant_filter(user, client_id)
+    if ids:
+        q["id"] = {"$in": [x for x in ids.split(",") if x]}
+    docs = await db.offenses.find(q, {"_id": 0}).sort("start_time", -1).to_list(2000)
+    return {
+        "export_version": 1,
+        "exported_at": _now(),
+        "exported_by": user.get("email"),
+        "client_id": client_id,
+        "count": len(docs),
+        "offenses": docs,
+    }
+
+
 @api.get("/offenses/{offense_id}")
 async def get_offense(offense_id: str, user: dict = Depends(get_current_user)):
     doc = await db.offenses.find_one({"id": offense_id}, {"_id": 0})

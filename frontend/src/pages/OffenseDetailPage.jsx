@@ -8,7 +8,7 @@ import { PayloadViewer } from "@/components/PayloadViewer";
 import { MsspReport } from "@/components/MsspReport";
 import { LifecycleActions } from "@/components/LifecycleActions";
 import { toast } from "sonner";
-import { Brain, Check, X, ArrowUpRight, Ban, Ticket as TicketIcon, Loader2, ArrowLeft, Layers } from "lucide-react";
+import { Brain, Check, X, ArrowUpRight, Ban, Ticket as TicketIcon, Loader2, ArrowLeft, Layers, Download } from "lucide-react";
 
 const TABS = [
   "summary", "mssp_report", "timeline", "events", "payload", "artifacts", "mitre", "similar", "kb", "recommendations",
@@ -51,6 +51,21 @@ export default function OffenseDetailPage() {
     return () => clearInterval(t);
     /* eslint-disable-next-line */
   }, [off?.ai_analysis?.llm_status, id]);
+
+  const exportOffense = () => {
+    try {
+      const blob = new Blob([JSON.stringify({ export_version: 1, exported_at: new Date().toISOString(), offenses: [off] }, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `offense-${off.qradar_offense_id || off.id.slice(0, 8)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Offense exported with events & payloads");
+    } catch (e) { toast.error("Export failed"); }
+  };
 
   const investigate = async () => {
     setInvestigating(true);
@@ -135,6 +150,13 @@ export default function OffenseDetailPage() {
           {investigating ? "Analyzing..." : off.ai_analysis ? "Re-run AI Analysis" : "Run AI Investigation"}
         </button>
         <div className="flex-1" />
+        <button
+          onClick={exportOffense}
+          data-testid="btn-export-offense"
+          className="border border-[#1F1F1F] hover:border-cyan-500 hover:text-cyan-400 px-3 py-2 text-xs font-mono uppercase tracking-widest text-neutral-300 inline-flex items-center gap-2"
+        >
+          <Download className="w-3.5 h-3.5" /> Export JSON
+        </button>
         <ActionBtn testId="btn-approve" onClick={() => doAction("approve")} icon={Check} label="Approve" color="emerald" />
         <ActionBtn testId="btn-reject" onClick={() => doAction("reject")} icon={X} label="Reject" color="rose" />
         <ActionBtn testId="btn-escalate" onClick={() => doAction("escalate")} icon={ArrowUpRight} label="Escalate L3" color="amber" />

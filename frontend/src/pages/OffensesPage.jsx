@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { useClients } from "@/lib/clients";
 import { SeverityChip, StatusChip } from "@/components/SeverityChip";
-import { Search, RefreshCw, X as XIcon } from "lucide-react";
+import { Search, RefreshCw, X as XIcon, Download } from "lucide-react";
 import { toast } from "sonner";
 
 const STATUS_OPTIONS = ["OPEN", "INVESTIGATING", "PENDING_APPROVAL", "ESCALATED", "RESOLVED", "CLOSED"];
@@ -20,6 +20,29 @@ export default function OffensesPage() {
   const [selected, setSelected] = useState(() => new Set());
   const [closeModal, setCloseModal] = useState(null); // { offenseIds: string[], bulk: boolean }
   const [bulkStatus, setBulkStatus] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  const exportOffenses = async () => {
+    if (!activeClientId) return toast.error("Select a client first");
+    setExporting(true);
+    try {
+      const params = new URLSearchParams({ client_id: activeClientId });
+      if (selected.size) params.set("ids", Array.from(selected).join(","));
+      const r = await api.get(`/offenses/export?${params}`);
+      const blob = new Blob([JSON.stringify(r.data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `offenses-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${r.data.count} offense(s) with events & payloads`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Export failed");
+    } finally { setExporting(false); }
+  };
 
   const load = async () => {
     if (!activeClientId) return;
@@ -104,6 +127,14 @@ export default function OffensesPage() {
           <h1 className="font-display text-3xl mt-1">Offenses</h1>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={exportOffenses}
+            disabled={exporting}
+            data-testid="btn-export-offenses"
+            className="border border-[#1F1F1F] hover:border-cyan-500 hover:text-cyan-400 px-3 py-1.5 text-[11px] font-mono uppercase tracking-widest text-neutral-300 inline-flex items-center gap-2"
+          >
+            <Download className="w-3 h-3" /> {exporting ? "Exporting..." : (selected.size ? `Export (${selected.size})` : "Export JSON")}
+          </button>
           <button
             onClick={syncFromQRadar}
             disabled={syncing}
