@@ -22,6 +22,10 @@ from pathlib import Path
 import pytest
 import requests
 
+# DISABLED: this legacy suite rewrites /app/backend/llm_engine.py on disk (mock swap). An
+# interrupted run leaves the stub in place and destroys uncommitted work. Use monkeypatching instead.
+pytest.skip("legacy on-disk module swap test disabled (destructive)", allow_module_level=True)
+
 def _load_frontend_env_url():
     try:
         for line in open("/app/frontend/.env"):

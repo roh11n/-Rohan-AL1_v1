@@ -395,6 +395,23 @@ async def _startup():
     if fixed:
         logger.info("Migration: recomputed real log source on %d offense report(s)", fixed)
 
+    # One-time migration: drop the auto-injected "Review the <log source> logs ..." pointer.
+    auto_ptr = re.compile(r"^Review the .{0,80} logs and correlate the surrounding events around the alert "
+                          r"time to confirm the scope, source and intent of the activity\.$")
+    stripped = 0
+    async for off in db.offenses.find({"ai_analysis.mssp_report.recommendations": {"$exists": True}},
+                                      {"_id": 0, "id": 1, "ai_analysis.mssp_report.recommendations": 1}):
+        recs = ((off.get("ai_analysis") or {}).get("mssp_report") or {}).get("recommendations") or []
+        kept = [r for r in recs if not auto_ptr.match(str(r).strip())]
+        if len(kept) != len(recs):
+            upd = {"ai_analysis.mssp_report.recommendations": kept}
+            if kept:
+                upd["ai_analysis.mssp_report.recommendation_text"] = kept[0]
+            await db.offenses.update_one({"id": off["id"]}, {"$set": upd})
+            stripped += 1
+    if stripped:
+        logger.info("Migration: removed auto review-logs pointer from %d report(s)", stripped)
+
 
 # ---------- Auth ----------
 @api.post("/auth/login", response_model=TokenResponse)
@@ -811,6 +828,11 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
         {"_id": 0},
     ).sort("uploaded_at", -1).to_list(500)
     matched_kb, match_score = kb_template.find_best_template(doc, manual_entries)
+    if matched_kb:
+        # Learn from EVERY historical ticket of this use case, not just one row.
+        same_uc = [e for e in manual_entries if kb_template.same_use_case(e, matched_kb)]
+        matched_kb = kb_template.consolidate_entries(same_uc or [matched_kb])
+        matched_kb["match_score"] = match_score
     rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
 
     # Base report is always the rule-engine report (carries extracted fields);
@@ -855,6 +877,12 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
                 "analysis": matched_kb.get("analysis"),
                 "impact": matched_kb.get("impact"),
                 "recommendations": matched_kb.get("recommendations") or [],
+                "analysis_points": matched_kb.get("analysis_points") or [],
+                "impact_points": matched_kb.get("impact_points") or [],
+                "recommendation_points": matched_kb.get("recommendation_points") or [],
+                "ticket_count": matched_kb.get("ticket_count") or 1,
+                "verdict_counts": matched_kb.get("verdict_counts") or {},
+                "match_score": match_score,
             }
 
     updates = {

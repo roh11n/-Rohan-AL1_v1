@@ -592,7 +592,7 @@ def _parse_sections(text: str | None) -> dict | None:
     heads = r"ANALYSIS|IMPACT|RECOMMENDATIONS?|VERDICT|REASON"
 
     def body(name: str) -> str:
-        m = re.search(rf"(?is)\b{name}\s*:?\s*(.*?)(?=\b(?:{heads})\b\s*:|$)", t)
+        m = re.search(rf"(?is)\b{name}\b\s*:?\s*(.*?)(?=\b(?:{heads})\b\s*:|$)", t)
         return m.group(1).strip() if m else ""
 
     def to_bullets(s: str) -> list[str]:
@@ -629,31 +629,182 @@ def _parse_sections(text: str | None) -> dict | None:
             "verdict": verdict, "reason": reason}
 
 
-def _ensure_review_logs(recs: list[str], log_source: str | None) -> list[str]:
-    """Guarantee a 'review the logs' investigation pointer is present."""
-    recs = [r for r in (recs or []) if str(r).strip()]
-    if any(re.search(r"(?i)review.{0,20}logs?|logs?.{0,20}review|correlate.{0,20}events?", r) for r in recs):
-        return recs
-    ls = (log_source or "").split("@")[0].split("::")[0].strip() or "the relevant device"
-    recs.append(f"Review the {ls} logs and correlate the surrounding events around the alert "
-                f"time to confirm the scope, source and intent of the activity.")
-    return recs
+_ARTIFACT_KEYS = [
+    ("source_ip", "source IP"), ("destination_ip", "destination IP"), ("username", "user account"),
+    ("machine_identifier", "host"), ("log_source", "log source"), ("x_destination_port", "destination port"),
+    ("x_protocol", "protocol"), ("x_action", "action"), ("x_process", "process"),
+    ("x_parent_process", "parent process"), ("x_command_line", "command line"),
+    ("x_file_hash", "file hash"), ("x_sha256", "SHA256"), ("x_md5", "MD5"), ("x_file_name", "file name"),
+    ("x_file_path", "file path"), ("x_domain_url", "domain/URL"), ("x_url", "URL"),
+    ("x_host", "host"), ("x_asset_name", "asset"), ("x_application", "application"),
+]
+
+
+def _artifacts(rule_engine_mssp: dict) -> list[tuple[str, str]]:
+    """(label, value) pairs of THIS offense's concrete artifacts, from the extracted fields."""
+    b = rule_engine_mssp or {}
+    out, seen = [], set()
+    for k, label in _ARTIFACT_KEYS:
+        v = b.get(k)
+        if v in (None, "", "N/A") or str(v) in seen:
+            continue
+        seen.add(str(v))
+        out.append((label, str(v)[:160]))
+    return out
+
+
+def _artifact_tokens(artifacts: list[tuple[str, str]]) -> list[str]:
+    toks = []
+    for _, v in artifacts:
+        v = v.split("@")[0].split("::")[0].strip()
+        if len(v) >= 3:
+            toks.append(v.lower())
+    return toks
+
+
+def _grounded(bullets: list[str], artifacts: list[tuple[str, str]]) -> int:
+    toks = _artifact_tokens(artifacts)
+    return sum(1 for b in bullets if any(t in b.lower() for t in toks))
+
+
+def _lead_bullet(rule_engine_mssp: dict, offense: dict) -> str | None:
+    """Deterministic, fully grounded opening sentence for THIS offense."""
+    b = rule_engine_mssp or {}
+    name = str(b.get("offense_name") or offense.get("description") or "").replace("\n", " ").strip()
+    name = re.sub(r"\s+", " ", name)
+    ls = str(b.get("log_source") or "").split("@")[0].split("::")[0].strip()
+    src, dst, user, host = b.get("source_ip"), b.get("destination_ip"), b.get("username"), b.get("machine_identifier")
+    if not (src or dst or user or host):
+        return None
+    s = f"The alert '{name}' " if name else "The alert "
+    s += f"was raised by {ls} " if ls else ""
+    who = []
+    if host:
+        who.append(f"host {host}")
+    if src:
+        who.append(f"source IP {src}")
+    if user:
+        who.append(f"user account {user}")
+    s += "for " + ", ".join(who) if who else ""
+    if dst:
+        port = b.get("x_destination_port")
+        s += f" communicating with destination {dst}" + (f" on port {port}" if port else "")
+    proc = b.get("x_process")
+    if proc:
+        s += f"; the process involved was {proc}"
+        if b.get("x_parent_process"):
+            s += f" (parent {b['x_parent_process']})"
+    if b.get("x_action"):
+        s += f"; the device action was '{b['x_action']}'"
+    if b.get("date_time"):
+        s += f" at {b['date_time']}"
+    return s.strip() + "."
 
 
 def _kb_writeup_block(kb_ref: dict | None) -> str:
-    """Authoritative analyst KB write-up (ITSM columns) for the SAME use case."""
+    """Learned analyst knowledge (ITSM columns) consolidated across every historical
+    ticket of the SAME use case."""
     if not kb_ref:
         return ""
-    parts = [f"USE CASE: {kb_ref.get('alert_name') or ''}"]
-    if kb_ref.get("analysis"):
-        parts.append("KB_ANALYSIS: " + str(kb_ref["analysis"])[:1600])
-    if kb_ref.get("impact"):
-        parts.append("KB_IMPACT: " + str(kb_ref["impact"])[:1000])
-    if kb_ref.get("recommendations"):
-        recs = kb_ref["recommendations"]
-        recs = "; ".join(recs) if isinstance(recs, list) else str(recs)
-        parts.append("KB_RECOMMENDATIONS: " + recs[:1200])
+    n = int(kb_ref.get("ticket_count") or 1)
+    parts = [f"USE CASE: {str(kb_ref.get('alert_name') or '').strip()}",
+             f"(learned from {n} historical analyst ticket{'s' if n != 1 else ''})"]
+
+    def pts(key, single, cap):
+        vals = kb_ref.get(key) or []
+        if not vals and kb_ref.get(single):
+            v = kb_ref[single]
+            vals = v if isinstance(v, list) else [v]
+        return [str(v).strip() for v in vals if str(v).strip()][:cap]
+
+    a = pts("analysis_points", "analysis", 8)
+    i = pts("impact_points", "impact", 6)
+    r = pts("recommendation_points", "recommendations", 8)
+    if a:
+        parts.append("KB_ANALYSIS (how analysts reasoned about this use case):\n" + "\n".join(f"- {x}" for x in a))
+    if i:
+        parts.append("KB_IMPACT:\n" + "\n".join(f"- {x}" for x in i))
+    if r:
+        parts.append("KB_RECOMMENDATIONS:\n" + "\n".join(f"- {x}" for x in r))
     return "\n".join(parts)
+
+
+_JUNK_RE = re.compile(
+    r"(?i)artifacts of this offense|use these exact values|learned knowledge|this offense\s*[—-]|"
+    r"^(report|type|title|name|severity|critical severity|use case|section|layout)\s*:|"
+    r"^(analysis|impact|recommendations?|verdict|reason)\s*:?\s*$")
+_IMPERATIVE_RE = re.compile(
+    r"(?i)^(?:[\w /-]{1,30}:\s*)?(block|isolate|disable|kill|terminate|reset|revoke|collect|decode|"
+    r"hunt|review|investigate|validate|verify|update|patch|remove|quarantine|escalate|notify|"
+    r"contain|monitor|preserve|interview|enable|enforce|rotate|restrict|check|confirm|run|scan|"
+    r"engage|report|reimage|re-image|restore|apply|ensure)\b")
+# Fabricated "we already did X" narration has no place in an L1 analysis of a new offense.
+_ACTIONS_TAKEN_RE = re.compile(r"(?i)^(mitigation|remediation|actions?\s+taken|recommendations?|next steps?)\b")
+# "Label: value" echoes of the artifact list (e.g. "Destination IP: 1.2.3.4", "Port Number: 443").
+_ECHO_RE = re.compile(
+    r"(?i)^(source|destination|dest|external|internal|remote)?\s*(ip( address)?|port( number)?|user(-agent| account|name)?|"
+    r"host(name)?|log source|proxy( server)?|dns( server)?|protocol|action|process|parent process|command line|"
+    r"file (hash|name|path)|sha256|md5|domain|url|asset|application|event name|time(stamp)?)\s*:\s*\S.{0,80}$")
+
+
+def _section_bullets(reply: str | None, min_words: int = 4) -> list[str]:
+    """Parse one section reply into clean bullets (tolerant of markdown/numbering)."""
+    if not reply:
+        return []
+    t = re.sub(r"`{3}[a-zA-Z]*", "", reply).replace("*", "").replace("#", "")
+    rows = []
+    for ln in re.split(r"\r?\n", t):
+        c = _clean_line(ln)
+        if not c or _STOP_RE.match(c) or _JUNK_RE.search(c):
+            continue
+        if re.match(r"(?i)^(analysis|impact|recommendations?|verdict|reason)\s*:", c):
+            c = re.sub(r"(?i)^(analysis|impact|recommendations?)\s*:\s*", "", c).strip()
+            if not c:
+                continue
+        rows.append(c)
+    if len(rows) <= 1 and t.strip():
+        blob = _clean_line(t.replace("\n", " "))
+        rows = [x.strip() for x in re.split(r"(?<=[.;])\s+", blob) if x.strip()]
+    rows = _sanitize_bullets(rows)
+    detail_prefix = re.compile(r"(?i)^(action|detail|details|steps?)\s*:\s*")
+    tagged = [(bool(detail_prefix.match(r)), detail_prefix.sub("", r)) for r in rows]
+    tagged = [(d, r) for d, r in tagged if len(r.split()) >= min_words and not _ECHO_RE.match(r)]
+    # Merge "Heading:" rows with an explicit "Action:" detail that follows; otherwise close them.
+    merged: list[str] = []
+    i = 0
+    while i < len(tagged):
+        _, r = tagged[i]
+        if r.endswith(":") and i + 1 < len(tagged) and tagged[i + 1][0]:
+            merged.append(f"{r[:-1].strip()} — {tagged[i + 1][1]}")
+            i += 2
+            continue
+        merged.append(r[:-1].strip() + "." if r.endswith(":") else r)
+        i += 1
+    rows = merged
+    # A truncated final bullet (max_new_tokens hit) is dropped rather than shown half-written.
+    if len(rows) > 1 and not re.search(r"[.!?)\]\"']$", rows[-1].strip()):
+        rows = rows[:-1]
+    return rows
+
+
+def _dedupe_across(primary: list[str], other: list[str]) -> list[str]:
+    seen = {re.sub(r"\W+", " ", p.lower()).strip() for p in primary}
+    return [o for o in other if re.sub(r"\W+", " ", o.lower()).strip() not in seen]
+
+
+def _verdict_from(reply: str | None) -> tuple[str, str]:
+    if not reply:
+        return "", ""
+    v = ""
+    vm = re.search(r"(?i)\bVERDICT\b\s*:?\s*\**\s*(true\s*positive|false\s*positive|suspicious|TP|FP)", reply)
+    if vm:
+        vv = vm.group(1).lower()
+        v = ("TP" if (vv == "tp" or "true" in vv) else "FP" if (vv == "fp" or "false" in vv) else "Suspicious")
+    rm = re.search(r"(?i)\bREASON\b\s*:?\s*(.+)", reply)
+    reason = _clean_line(re.split(r"\r?\n", rm.group(1))[0]) if rm else ""
+    reason = reason.lstrip("*:- ").strip()
+    reason = "" if _JUNK_RE.search(reason) else reason[:600]
+    return v, reason
 
 
 def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
@@ -664,109 +815,111 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
                                   timeout_seconds: int = 240,
                                   ioc_enrichment: dict | None = None,
                                   kb_ref: dict | None = None) -> dict | None:
-    """Local-LLM pass producing a structured, TECHNICAL MSSP L1 analysis grounded in
-    THIS offense's fields, events and payloads. The knowledge-base reference (a prior
-    analysis of the SAME use-case) is provided so the model learns the expected format,
-    depth and terminology — not for historical comparison. Returns a drop-in
-    mssp_report dict (analysis_lines / impact_lines / recommendations / verdict), or
-    None to fall back to the rule/KB report."""
+    """Local-LLM MSSP L1 report, generated SECTION BY SECTION (small-model friendly):
+    Analysis -> Impact -> Recommendations+Verdict. When the use case matches the KB, the
+    consolidated analyst knowledge (ITSM analysis/impact/recommendations across all
+    tickets) is the reasoning the model must apply to THIS offense's artifacts. Every
+    bullet is then grounded with the offense's real values. Falls back to the grounded
+    KB/rule base for any section the model leaves empty. Returns None only when nothing
+    usable exists."""
     started = time.time()
     try:
+        from kb_template import build_fieldmap, fix_direction, ground_sentence
         kb_block = _kb_writeup_block(kb_ref)
+        artifacts = _artifacts(rule_engine_mssp)
+        art_block = "\n".join(f"- {lbl}: {val}" for lbl, val in artifacts) or "- (none extracted)"
+        alert_name = str(offense.get("description") or "")
+        fm = build_fieldmap(rule_engine_mssp, offense)
+
         if kb_block:
-            sys_msg = (
-                "You are an experienced MSSP SOC L1 analyst. You are given the analyst "
-                "KNOWLEDGE-BASE WRITE-UP (from prior ITSM tickets) for the SAME use case as this "
-                "offense, plus this offense's fields, events and payloads. READ the KB write-up, "
-                "understand its meaning and reasoning, then produce the report for THIS offense by "
-                "ADAPTING that KB knowledge to this offense's real artifacts (hosts, IPs, accounts, "
-                "processes, ports, actions, log source).\n"
-                "RULES:\n"
-                "- Reuse the KB write-up's technical reasoning and depth; do not contradict it.\n"
-                "- Write short, plain-English technical bullet sentences. No JSON, no field names, "
-                "no key=value pairs, no raw payload text.\n"
-                "- Do NOT mention other/previous/historical/similar offenses or the knowledge base itself.\n"
-                "- Ground every statement in this offense's data.\n"
-                "Respond EXACTLY in this layout and nothing else:\n"
-                "ANALYSIS:\n- <why the alert triggered / what is involved / behavior observed>\n"
-                "IMPACT:\n- <concrete technical impact in the environment>\n"
-                "RECOMMENDATIONS:\n- <technical remediation / containment / investigation step; include reviewing the relevant logs>\n"
-                "VERDICT: <TP or FP or Suspicious>\n"
-                "REASON: <one technical sentence>\n"
-                "Use 3-5 ANALYSIS bullets, 2-4 IMPACT bullets, 3-5 RECOMMENDATIONS bullets."
+            role = (
+                "You are an experienced MSSP SOC L1 analyst. You have the LEARNED KNOWLEDGE for this "
+                "exact use case (consolidated from analysts' historical ITSM tickets). Apply that reasoning "
+                "to THIS offense: same conclusions, depth and terminology, but with THIS offense's real "
+                "artifacts (IPs, user, host, process, port, action, log source) written into every bullet. "
+                "Never contradict the learned knowledge; never copy it without inserting this offense's values. "
+                "Do NOT mention other/previous/historical tickets, offenses or the knowledge base. "
+                "Plain-English technical sentences only: no JSON, no field names, no key=value, no raw payload."
             )
-            user_msg = (
-                "KNOWLEDGE-BASE WRITE-UP FOR THIS USE CASE (adapt this to the offense below):\n"
-                + kb_block + "\n\n"
-                "THIS OFFENSE — FIELDS:\n" + _fields_block(rule_engine_mssp, offense) + "\n\n"
-                "THIS OFFENSE — EVENTS (with payload):\n" + _events_block(events) + "\n\n"
-                "Now write the report in the exact layout above, adapting the KB write-up to this offense."
-            )
+            context = ("LEARNED KNOWLEDGE FOR THIS USE CASE:\n" + kb_block + "\n\n")
         else:
-            sys_msg = (
-                "You are an experienced MSSP SOC L1 analyst. Write a concise, TECHNICAL analyst "
-                "report for ONE QRadar offense using its fields, events and payloads.\n"
-                "RULES:\n"
-                "- Write short, plain-English technical bullet sentences. Do NOT output JSON, field "
-                "names, key=value pairs, or raw payload text.\n"
-                "- Do NOT compare to or mention any other/previous/historical/similar offenses.\n"
-                "- Ground every statement in the provided fields/payload (hosts, IPs, accounts, "
-                "processes, ports, actions, log source).\n"
-                "Respond EXACTLY in this layout and nothing else:\n"
-                "ANALYSIS:\n- <why the alert triggered / what is involved / behavior observed>\n"
-                "IMPACT:\n- <concrete technical impact in the environment>\n"
-                "RECOMMENDATIONS:\n- <technical remediation / containment / investigation step; include reviewing the relevant logs>\n"
-                "VERDICT: <TP or FP or Suspicious>\n"
-                "REASON: <one technical sentence>\n"
-                "Use 3-5 ANALYSIS bullets, 2-4 IMPACT bullets, 3-5 RECOMMENDATIONS bullets."
+            role = (
+                "You are an experienced MSSP SOC L1 analyst writing a concise TECHNICAL report for ONE "
+                "QRadar offense from its artifacts, fields, events and payloads. Name the actual IP, user, "
+                "host, process, port, action or log source in every bullet. Do NOT compare to or mention any "
+                "other/previous/historical offenses. Plain-English technical sentences only: no JSON, no field "
+                "names, no key=value, no raw payload."
             )
-            user_msg = (
-                "OFFENSE FIELDS:\n" + _fields_block(rule_engine_mssp, offense) + "\n\n"
-                "EVENTS (with payload):\n" + _events_block(events) + "\n\n"
-                "KNOWLEDGE-BASE REFERENCE (same use case — match its style/depth only, do not reuse its data):\n"
-                + _kb_reference_block(kb_matches) + "\n\n"
-                "Now write the report in the exact layout above."
-            )
-        parsed = None
-        for temp in (temperature, 0.0):
-            reply = _chat_with_timeout(
-                model_name,
-                [{"role": "system", "content": sys_msg},
-                 {"role": "user", "content": user_msg}],
-                max_new_tokens=420, temperature=temp, timeout_seconds=timeout_seconds,
-            )
-            parsed = _parse_sections(reply)
-            if isinstance(parsed, dict) and parsed.get("analysis"):
-                break
-        # Base = the report we were handed (KB-template when a use-case matched, else
-        # rule-engine). We overlay whatever the model produced and BACKFILL any section
-        # the (small) model leaves empty from this technical base — so the report is
-        # always complete while the model still drives the verdict/refinements.
+            context = ("KNOWLEDGE-BASE REFERENCE (same use case — match its style/depth only, do not reuse its data):\n"
+                       + _kb_reference_block(kb_matches) + "\n\n")
+        context += ("ARTIFACTS OF THIS OFFENSE (use these exact values):\n" + art_block + "\n\n"
+                    "OFFENSE FIELDS:\n" + _fields_block(rule_engine_mssp, offense) + "\n\n"
+                    "EVENTS (with payload):\n" + _events_block(events) + "\n\n")
+
+        def ask(task: str, max_tokens: int) -> str | None:
+            for temp in (temperature, 0.0):
+                r = _chat_with_timeout(
+                    model_name,
+                    [{"role": "system", "content": role},
+                     {"role": "user", "content": context + task}],
+                    max_new_tokens=max_tokens, temperature=temp, timeout_seconds=timeout_seconds)
+                if r and r.strip():
+                    return r
+            return None
+
+        a_reply = ask(
+            "Write ONLY the ANALYSIS section: 3-4 bullets, each starting with '- ', explaining why the "
+            "alert triggered, what was involved and the behaviour observed for THIS offense (use the "
+            "artifact values). No other sections, no headings.", 220)
+        i_reply = ask(
+            "Write ONLY the IMPACT section: 2-3 bullets, each starting with '- ', stating the concrete "
+            "technical/business impact of THIS activity for the affected host/user/environment. No "
+            "recommendations, no other sections, no headings.", 150)
+        r_reply = ask(
+            "Write ONLY the RECOMMENDATIONS section: 3-5 bullets, each starting with '- ', each a "
+            "specific remediation/containment/investigation action applied to THIS offense's artifacts. "
+            "Then on separate lines write exactly:\nVERDICT: <TP or FP or Suspicious>\nREASON: <one technical sentence>", 260)
+
+        def polish(items):
+            out_ = []
+            for s in items:
+                s = fix_direction(ground_sentence(s, fm), alert_name)
+                if s not in out_:
+                    out_.append(s)
+            return out_
+
+        analysis = _section_bullets(a_reply)
+        impact = _section_bullets(i_reply)
+        recs = _section_bullets(r_reply and re.split(r"(?i)\bVERDICT\b", r_reply)[0])
+        # Route imperative "do X" sentences the model put in Analysis/Impact into Recommendations.
+        moved = [b for b in analysis + impact if _IMPERATIVE_RE.match(b)]
+        analysis = [b for b in analysis if not _IMPERATIVE_RE.match(b) and not _ACTIONS_TAKEN_RE.match(b)]
+        impact = [b for b in impact if not _IMPERATIVE_RE.match(b) and not _ACTIONS_TAKEN_RE.match(b)]
+        recs = recs + _dedupe_across(recs, moved)
+        impact = _dedupe_across(analysis, impact)
+        analysis, impact, recs = polish(analysis)[:6], polish(impact)[:4], polish(recs)[:6]
+        v, reason = _verdict_from(r_reply)
+
         out = dict(rule_engine_mssp or {})
         base_has_analysis = bool(out.get("analysis_lines"))
-        if not isinstance(parsed, dict):
-            if base_has_analysis:
-                out["recommendations"] = _ensure_review_logs(out.get("recommendations"), out.get("log_source"))
-                if out.get("recommendations"):
-                    out["recommendation_text"] = out["recommendations"][0]
-                return out
-            return None
-
-        analysis = _sanitize_bullets(parsed.get("analysis"))
-        impact = _sanitize_bullets(parsed.get("impact"))
-        recs = _sanitize_bullets(parsed.get("recommendations"))
         if not analysis and not recs and not base_has_analysis:
             return None
-        v = str(parsed.get("verdict") or "").strip()
-        reason = str(parsed.get("reason") or "").strip()
 
+        lead = _lead_bullet(rule_engine_mssp, offense)
         if analysis:
-            out["analysis_lines"] = [{"n": i, "text": t} for i, t in enumerate(analysis, 1)]
+            if lead and _grounded(analysis, artifacts) < 2:
+                analysis = [lead] + analysis
+            out["analysis_lines"] = [{"n": i, "text": t} for i, t in enumerate(analysis[:7], 1)]
+        elif lead and base_has_analysis:
+            base_txt = [ln.get("text") for ln in out["analysis_lines"] if ln.get("text")]
+            if _grounded(base_txt, artifacts) < 2:
+                out["analysis_lines"] = [{"n": i, "text": t} for i, t in enumerate([lead] + base_txt, 1)]
+        out["llm_grounded_bullets"] = _grounded([ln["text"] for ln in out.get("analysis_lines") or []], artifacts)
         if impact:
             out["impact_lines"] = impact
         if recs:
             out["recommendations"] = recs
-        out["recommendations"] = _ensure_review_logs(out.get("recommendations"), out.get("log_source"))
+        out["recommendations"] = [r for r in (out.get("recommendations") or []) if str(r).strip()]
         if out.get("recommendations"):
             out["recommendation_text"] = out["recommendations"][0]
         if v in ("TP", "FP", "Suspicious"):
@@ -777,6 +930,14 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
         out["verdict_reason"] = out.get("verdict_reason") or ""
         if ioc_enrichment:
             out["ioc_enrichment"] = ioc_enrichment
+        if kb_ref:
+            out["kb_learning"] = {
+                "alert_name": kb_ref.get("alert_name"),
+                "ticket_count": int(kb_ref.get("ticket_count") or 1),
+                "match_score": kb_ref.get("match_score") or out.get("kb_template_score"),
+                "verdict_counts": kb_ref.get("verdict_counts") or {},
+            }
+        out["llm_sections"] = {"analysis": bool(analysis), "impact": bool(impact), "recommendations": bool(recs)}
         out["generated_by"] = f"llm:{model_name}"
         out["llm_total_seconds"] = round(time.time() - started, 1)
         return out

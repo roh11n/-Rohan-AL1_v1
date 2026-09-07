@@ -155,6 +155,14 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
                   : "Rule Engine"}
             </span>
           )}
+          {report.kb_learning && report.kb_learning.ticket_count > 0 && !editing && (
+            <span className="tg-model" data-testid={`${testId}-kb-learning`}
+                  title={`Learned from ${report.kb_learning.ticket_count} historical ticket(s) for use case: ${report.kb_learning.alert_name || ""}`}
+                  style={{ color: "var(--tg-cyan)" }}>
+              KB · {report.kb_learning.ticket_count} ticket{report.kb_learning.ticket_count === 1 ? "" : "s"}
+              {report.kb_learning.match_score ? ` · ${report.kb_learning.match_score}%` : ""}
+            </span>
+          )}
           {report.verdict && !editing && (
             <span className="tg-sev" data-testid={`${testId}-verdict`}
                   style={{ background: verdictColor.bg, borderColor: verdictColor.border, color: verdictColor.fg }}>

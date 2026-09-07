@@ -58,3 +58,18 @@ Known non-blocking (pre-existing, not in this bug report): risk-donut overlaps C
 - Recommendations always include a "Review the <log source> logs and correlate ..." pointer (llm_engine._ensure_review_logs + kb_template).
 - Cleanups: _sanitize_bullets drops code/script fragments and bare section markers (e.g. VARIABLES:). IOC Enrichment now also enriches the external IP found in extracted IOCs (server passes analysis.iocs.ipv4_external), fixing null-IOC + misleading TI verdict wording.
 - Verified: testing agent iteration_3 -> fixes -> iteration_4 (4/4 backend pytest, 100% frontend). Report order Analysis -> Impact -> Recommendations -> IOC Enrichment -> Verdict.
+
+
+## 2026-06 — Real KB learning (consolidated ITSM knowledge, grounded output)
+- Use-case matching: fuzzy name match kept, but conflicting words (Inbound/Outbound, Allowed/Denied, ...) or differing UC numbers => different use case (fixed 00317 Inbound matching 00316 Outbound KB).
+- Consolidation: ALL kb.csv rows of the matched use case are merged (sentence dedupe, consensus weighting across tickets, verdict counts). `mssp_report.kb_learning` = {alert_name, ticket_count, match_score, verdict_counts}; UI badge "KB · N tickets · score%" (data-testid *-kb-learning).
+- LLM: per-section generation (Analysis -> Impact -> Recommendations+Verdict) for the 0.5B model; junk/echo filtering, imperative routing to Recommendations, heading merge, truncated-bullet drop.
+- Grounding: `kb_template.ground_sentence` injects this offense's IPs/host/user/process/port into KB & LLM bullets; deterministic grounded lead bullet when <2 bullets mention artifacts; inbound/outbound slips corrected vs alert name.
+- Removed auto "Review the <log source> logs..." pointer (user request) + startup migration strips it from stored reports.
+- Verdict remains LLM/threat-intel driven (KB verdict only in the instant kb-template pre-report).
+- Legacy destructive test `tests/test_llm_mssp.py` is module-skipped (it swapped llm_engine.py on disk and once wiped edits).
+- Verified: test_reports/iteration_6.json (4/4 backend, frontend E2E pass).
+
+### Backlog
+- P1: larger local model option (Qwen2.5-3B) if RAM/disk allow; file-hash VT enrichment for malware alerts.
+- P2: secondary TI (OTX/AbuseIPDB); KB match insight panel (which sentences were learned/used).

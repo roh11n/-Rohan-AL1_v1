@@ -1,0 +1,41 @@
+{
+  "summary": "RETEST of iteration_5 LLM grounding failure. Environment verified clean: /app/backend/llm_engine_orig.py does NOT exist, /app/backend/llm_engine.py is 946 lines and contains 'def _section_bullets', test_llm_mssp.py is module-skipped (pytest.skip allow_module_level=True at line 27). settings.llm.analysis_mode == 'llm', enable_llm == true, model Qwen/Qwen2.5-0.5B-Instruct. Wrote /app/backend/tests/test_iteration_15.py (4 tests, ~6 investigate calls, well under 8/hr budget). ALL 4 PASSED in 249s: (1) test_00316_outbound_llm_run1 — 00316 Outbound investigated + LLM polled to done, mssp_report_source==llm, generated_by=='llm:Qwen/Qwen2.5-0.5B-Instruct', kb_learning.ticket_count==6, analysis has 10.13.122.218 & 162.159.134.233 (2 grounded bullets), rec #1 'Block the External IP: ... 162.159.134.233', rec #2 'Investigate the Source Host 10.13.122.218', 3-6 recs, no echoed 'Destination IP:/Port Number:/User-Agent:/Proxy Server:/DNS Server:' bullets, no bare ':' endings, no 'inbound' in analysis, no 'ARTIFACTS OF THIS OFFENSE', verdict TP, verdict_reason does not start with '*', no review-logs pointer. (2) test_00316_outbound_llm_run2 — same invariants pass on 2nd non-deterministic run (rec #1 'Block the External IP 162.159.134.233: To prevent unauthorized access...', rec #2 'Investigate the Source Host 10.13.122.218:', rec #5 'Update Firewall Rules ... source host 10.13.122.218'). (3) test_00317_inbound_no_kb — mssp_report_source=='rule-engine', kb_learning absent (fuzzy direction/UC-number rejection works). (4) test_powershell_kb_and_llm — kb_learning.ticket_count==1, recs grounded with powershell.exe/outlook.exe, impact_lines have no imperative Block/Isolate/Collect and no Report:/Type: junk. Frontend E2E (admin@socpilot.ai / Admin@123 → ACME tenant → 00316 Outbound → mssp report tab): all three testids present — offense-mssp-report-kb-learning='KB · 6 tickets · 100%', offense-mssp-report-source='Local LLM', offense-mssp-report-verdict='Verdict · TP'. Analysis lines contain 10.13.122.218 & 162.159.134.233, Impact + Recommendations + Analysis sections render, verdict TP with grounded reason, NO review-logs pointer in DOM. Iteration_5 grounding CRITICAL bugs are FIXED.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "test_iteration_14.py", "issue": "Legacy test file has an infinite-recursion bug at line 76 (`def _texts(lst): return _texts(lst or [])`) and a syntax typo at line 141 referencing undefined `rpt`. Not run this iteration; superseded by test_iteration_15.py."},
+      {"endpoint": "backend tests dir", "issue": "Many legacy iteration tests (test_smoke_deploy, test_offense_workflow, test_mssp_report, test_iteration_10/11/12/13, test_analyst_feedback_kb) fail with 401 'Invalid credentials' or stale schema assertions — pre-existing test rot from earlier iterations, not regressions from this change. Recommend pruning or converting to xfail."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "MSSP report tab (00316 Outbound)", "issues": ["Review request mentions 'IOC Enrichment' section; the rendered report uses Analysis / Impact / Recommendations / Verdict but no explicitly-labeled 'IOC Enrichment' section (IOCs surface via the separate Payload/Artifacts tab). Cosmetic naming gap, not a bug."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_15.py",
+    "/app/test_reports/pytest/iter15.xml"
+  ],
+  "action_items": [
+    "(optional) Delete or fix /app/backend/tests/test_iteration_14.py — has _texts infinite recursion + undefined `rpt` at line 141.",
+    "(optional) Prune legacy failing tests (test_smoke_deploy uses wrong admin creds; test_offense_workflow / test_mssp_report / test_iteration_10/11/12/13 have stale seed/schema expectations)."
+  ],
+  "critical_code_review_comments": [
+    "LLM grounding is now working reliably across two non-deterministic runs for 00316 Outbound: _section_bullets + _lead_bullet + kb_template.ground_sentence correctly inject THIS offense's src_ip 10.13.122.218 and dst_ip 162.159.134.233 into analysis bullets AND into 'Block External IP' / 'Investigate Source Host' recommendations. Iteration_5's grounding regression is resolved.",
+    "Iteration_5 'Destination IP:/Port Number:/User-Agent:/Proxy Server:/DNS Server:' echoed-artifact leaks into recommendations are no longer observed — _sanitize_bullets / _IMPERATIVE_RE routing correctly drops Key:value echoes.",
+    "Iteration_5 direction-contradiction ('inbound' in an Outbound offense's analysis) not observed — kb_template.fix_direction is being applied to LLM output.",
+    "00317 Inbound correctly falls through to rule-engine (no kb_learning) — fuzzy direction/UC-number penalty rejects the 00316 KB as required."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_15.py (new — 4 pytest cases, all pass in 249s)"
+  ],
+  "success_rate": {"backend": "100% (4/4 pytest test_iteration_15)", "frontend": "100% (all three testids + all invariants pass)"},
+  "test_credentials": "admin@socpilot.ai / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — used existing ACME (faa7fdb9…) offenses: 00316 Outbound 8b9c7d98-1efa-4886-8e0d-73bd8ab7d029, 00317 Inbound, PowerShell.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration_5 grounding failure is fixed and stable across 2 non-deterministic LLM runs. Environment is clean: no llm_engine_orig.py, real llm_engine.py in place, test_llm_mssp.py is module-skipped. If re-running, use /app/backend/tests/test_iteration_15.py (not iteration_14 which has recursive bug). Each LLM investigate takes ~60-90s. Rate limit 30/hr per user — this test suite uses ~6 investigate calls. Legacy tests in /app/backend/tests/ (smoke_deploy, offense_workflow, mssp_report, iteration_10/11/12/13, analyst_feedback_kb) fail with pre-existing rot and can be ignored.",
+  "rca of the issue": "Iteration_5 grounding bugs were fixed by main agent between iterations: _section_bullets now substitutes offense artifacts into per-section LLM bullets, _lead_bullet grounds the first analysis line to THIS offense's src/dst, ground_sentence rewrites recommendations with the concrete IPs, fix_direction is applied post-LLM so 'inbound' never survives on Outbound offenses, and _sanitize_bullets drops 'Key: value' echo lines (Destination IP:/Port Number:/User-Agent:/Proxy Server:/DNS Server:) before they reach recommendations. Verified stable across two sequential LLM runs of 00316 Outbound. No further action needed on backend."
+}
