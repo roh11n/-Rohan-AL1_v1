@@ -344,7 +344,7 @@ def _build_timeline(off: dict, events: list[dict]) -> list[dict]:
         tl.append({
             "ts": e.get("event_time"),
             "label": e.get("event_name") or e.get("category") or "Event",
-            "detail": (e.get("payload") or "")[:200],
+            "detail": (e.get("decoded_payload") or e.get("payload") or ""),
         })
     tl.append({
         "ts": off.get("last_updated"),
@@ -630,9 +630,10 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if log_source_name:
         log_source_str = f"{log_source_name} @ {log_source_ip}" if log_source_ip else log_source_name
 
-    src_ip = _first(offense.get("source_ips"))
-    dst_ip = _first(offense.get("destination_ips"))
-    username = _first(offense.get("usernames"))
+    payload_kv = _parse_payload_kv(events)
+    src_ip = _first(offense.get("source_ips")) or payload_kv.get("source_ip")
+    dst_ip = _first(offense.get("destination_ips")) or payload_kv.get("destination_ip")
+    username = _first(offense.get("usernames")) or payload_kv.get("username")
 
     # Date formatting: "21 Jul 2026, 09:29:58"
     from datetime import datetime as _dt
@@ -666,7 +667,16 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if log_source_str: optional_fields.append(("log_source", "Log source"))
 
     # Discover NEW fields dynamically from event payloads (LLM-style extraction via regex).
-    discovered = _discover_extra_fields(events)
+    # Prepend the LEEF/key=value parsed fields (ports, protocol, action, rule name).
+    pkv_fields = []
+    if payload_kv.get("source_port"): pkv_fields.append(("Source Port", payload_kv["source_port"]))
+    if payload_kv.get("destination_port"): pkv_fields.append(("Destination Port", payload_kv["destination_port"]))
+    if payload_kv.get("protocol"): pkv_fields.append(("Protocol", payload_kv["protocol"]))
+    if payload_kv.get("action"): pkv_fields.append(("Action", payload_kv["action"]))
+    if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
+    discovered = pkv_fields + _discover_extra_fields(events)
+    _seen_lbl = set()
+    discovered = [(l, v) for (l, v) in discovered if not (l in _seen_lbl or _seen_lbl.add(l))]
     for label, value in discovered:
         key = f"x_{label.lower().replace(' ', '_')}"
         optional_fields.append((key, label))
@@ -732,6 +742,55 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
         key = f"x_{label.lower().replace(' ', '_')}"
         report_dict.setdefault(key, value)
     return report_dict
+
+
+def _parse_payload_kv(events: list[dict]) -> dict:
+    """Parse key=value / LEEF attributes and 'Key: Value' pairs out of raw event
+    payloads. Returns a normalised dict of common SOC fields (source_ip,
+    destination_ip, source_port, destination_port, protocol, action, rule_name,
+    username). LEEF example:
+      LEEF:2.0|Check Point|VPN-1|1.0|Accept|src=1.2.3.4 dst=5.6.7.8 srcPort=443 ...
+    """
+    import re as _re
+    text = " ".join(
+        [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
+    )
+    if not text:
+        return {}
+    # Collect key=value tokens (values run until the next ' key=' or end).
+    kv: dict[str, str] = {}
+    for m in _re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)=([^=]*?)(?=\s+[A-Za-z_][A-Za-z0-9_.]*=|$)", text):
+        k = m.group(1).strip().lower()
+        v = m.group(2).strip().strip('"').strip("'")
+        if v and k not in kv:
+            kv[k] = v
+    # Also capture 'Key: Value' style (Windows / generic).
+    for m in _re.finditer(r"([A-Za-z][A-Za-z _]{1,30}?)\s*:\s*([^\n\r]+?)(?:\s{2,}|$)", text):
+        k = m.group(1).strip().lower().replace(" ", "_")
+        v = m.group(2).strip()
+        if v and k not in kv:
+            kv[k] = v
+
+    def pick(*names):
+        for n in names:
+            if kv.get(n):
+                return kv[n]
+        return None
+
+    proto = pick("proto", "protocol", "protocolname")
+    if proto and proto.isdigit():
+        proto = {"1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "50": "ESP"}.get(proto, proto)
+    out = {
+        "source_ip": pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip"),
+        "destination_ip": pick("dst", "destination_ip", "destinationip", "dest_ip", "dhost", "origin"),
+        "source_port": pick("srcport", "source_port", "sport", "spt"),
+        "destination_port": pick("dstport", "destination_port", "dport", "dpt", "service"),
+        "protocol": proto,
+        "action": pick("action", "rule_action", "act"),
+        "rule_name": pick("rule_name", "rulename", "rule"),
+        "username": pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
+    }
+    return {k: v for k, v in out.items() if v}
 
 
 def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:

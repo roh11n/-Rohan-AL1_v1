@@ -57,6 +57,13 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
     return raw.filter(([k]) => EDITABLE_KEYS.has(k));
   }, [report]);
 
+  // Read-only view shows ALL report fields, including dynamically-discovered
+  // payload fields (Source Port, Protocol, Action, Rule Name, SQL Command, …).
+  const allFields = useMemo(
+    () => ((report?.fields && report.fields.length) ? report.fields : DEFAULT_FIELDS),
+    [report],
+  );
+
   if (!report) {
     return (
       <div className="tactical-panel p-6 text-sm" style={{ color: "var(--tg-text-muted)" }} data-testid={`${testId}-empty`}>
@@ -169,11 +176,11 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
       </div>
 
       <div className="font-mono text-sm space-y-2" style={{ color: "var(--tg-text)" }}>
-        {editableFields.map(([k, label]) => {
+        {(editing ? editableFields : allFields).map(([k, label]) => {
           const val = editing ? draft.fields[k] : report[k];
           const clickable = !editing && !!onFieldClick && val;
           return (
-            <div key={k} className="grid grid-cols-[180px_1fr] gap-3 items-center" data-testid={`${testId}-${k}`}>
+            <div key={k} className="grid grid-cols-[180px_1fr] gap-3 items-start" data-testid={`${testId}-${k}`}>
               <div style={{ color: "var(--tg-text-muted)" }}>{label}:</div>
               {editing ? (
                 <input value={val || ""} onChange={(e) => setDraft({ ...draft, fields: { ...draft.fields, [k]: e.target.value } })}
@@ -182,12 +189,12 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
                        style={{ background: "var(--tg-surface-2)", border: "1px solid var(--tg-border)", color: "var(--tg-text)" }} />
               ) : clickable ? (
                 <button onClick={() => onFieldClick(label, val)} data-testid={`${testId}-${k}-jump`}
-                        className="text-left break-words hover:underline decoration-dotted"
+                        className="text-left break-all hover:underline decoration-dotted"
                         style={{ color: "var(--tg-text)" }}>
                   {val}
                 </button>
               ) : (
-                <div className="break-words" style={{ color: "var(--tg-text)" }}>
+                <div className="break-all whitespace-pre-wrap" style={{ color: "var(--tg-text)" }}>
                   {val ?? <span style={{ color: "var(--tg-text-hint)" }}>—</span>}
                 </div>
               )}

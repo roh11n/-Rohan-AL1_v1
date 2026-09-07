@@ -339,6 +339,14 @@ html.dark {
     border: 1px solid var(--tg-border);
     border-radius: 8px;
     color: var(--tg-text);
+    padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
 }
 .payload-viewer .ioc-ipv4 { color: var(--tg-red); font-weight: 600; }
 .payload-viewer .ioc-ipv4-priv { color: var(--tg-indigo); }
