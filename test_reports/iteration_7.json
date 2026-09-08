@@ -1,0 +1,34 @@
+{
+  "summary": "Backend-only validation for the UC-00508 (Trend Micro Apex Central / Behavior Monitoring / New startup program) fix on offense 0d75ac25-9714-4f42-a854-03af415d43ff. Wrote /app/backend/tests/test_iteration_16.py which logs in as admin, POSTs /api/offenses/{id}/investigate, immediately GETs /api/offenses/{id} (rule-engine base), then polls up to ~160s for ai_analysis.llm_status in {done,failed}, and asserts grounded content in BOTH states. ALL assertions PASS in ~48-54s across two consecutive runs. Verified: (a) Analysis mentions the registry autorun key HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Figma Agent, the file 'figma_agent.exe', host 'LTWGSLVAP1424', and device action 'Assess'; (b) Impact section is non-empty, mentions startup/autorun/persistence AND explicitly states 'no evidence of confirmed compromise/infection'; (c) Recommendations include >=3 items covering: verify legitimacy of figma_agent.exe, review startup/registry autorun/scheduled tasks, run full AV/EDR scan on the endpoint, and remove/delete the persistence mechanism if malicious; (d) No prompt/meta echo leakage ('We need to output', 'each starting with', 'REASON:', 'Must mention actual IP', 'ANALYSIS section', '<one technical sentence>', literal '<...>' placeholders); (e) No 'user None' / \"user 'None'\" text; (f) Grounded content survives regardless of final llm_status (done or failed).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_16.py",
+    "/app/test_reports/pytest/iter16.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "soc_engine._parse_payload_kv now correctly extracts Trend Micro Apex Central CEF fields (sproc/file, TMCMLogTarget/registry autorun, shost/host, act/action, and csNLabel pairs Rule_Name/Operation/Risk_Level/Event_Type) and _generate_analysis_lines' malware/behavior-monitoring/persistence branch weaves them into a single grounded sentence.",
+    "_generate_impact_lines produces the required non-empty impact narrative including 'persistence via HKCU...Run key' AND the 'no evidence of confirmed compromise/infection' qualifier when action=='Assess' (i.e., detection-only, not blocked).",
+    "_generate_recommendations persistence branch returns the 4 required actions grounded on figma_agent.exe and the Run key; count is within the 3-6 window expected by MSSP conventions.",
+    "'user None' rendering bug is fixed — analysis text for this offense (which has no username) does not include the placeholder string.",
+    "Grounded artifacts are produced by the deterministic base and therefore survive whether the background OpenRouter free-tier LLM returns 'done' or 'failed'/rate-limited — matches the design invariant in the review request."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_16.py (new)"
+  ],
+  "success_rate": {"backend": "100% (1/1 pytest test_iteration_16, 2 consecutive successful runs)", "frontend": "not tested (backend-only per request)"},
+  "test_credentials": "admin@socpilot.ai / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — used existing offense 0d75ac25-9714-4f42-a854-03af415d43ff.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "UC-00508 (Trend Micro Apex Central / Behavior Monitoring / Persistence) fix is validated and stable. test_iteration_16.py can be reused as a regression: it triggers investigate, checks immediate rule-engine base AND the final polled state for grounded artifacts. Note: the backend emits the registry key with escaped backslashes ('HKCU\\\\Software\\\\...') in the JSON string so the test normalizes \\\\ -> \\ before comparing. Login timeout should be >=60s (bcrypt is slow on the preview host). One investigate call per run.",
+  "rca of the issue": "N/A — this iteration is a green-path validation of a fix, no bug found. Fix (main agent) works: soc_engine._parse_payload_kv extracts CEF Apex Central artifacts, _generate_analysis_lines/_generate_impact_lines/_generate_recommendations weave them into a grounded, persistence-aware narrative, and llm_engine preserves the deterministic base when the OpenRouter LLM returns empty/echo/failed."
+}

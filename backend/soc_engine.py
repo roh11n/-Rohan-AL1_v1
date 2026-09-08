@@ -621,6 +621,36 @@ def _verdict_for(offense: dict, similar: list[dict] | None, iocs: dict,
     return "Suspicious", reason
 
 
+def _generate_impact_lines(offense, events, payload_kv, src_ip, dst_ip,
+                           username, machine_id) -> list[str]:
+    """Deterministic 1-2 sentence business/technical impact, tailored by category.
+    Used as the base impact (the LLM refines it; kept when the LLM leaves it empty)."""
+    desc_l = (offense.get("description") or "").lower()
+    ll = " ".join((offense.get("categories") or []) + (offense.get("rules") or [])).lower()
+    host = machine_id or (payload_kv or {}).get("host") or src_ip or "the affected endpoint"
+    if ("virus" in desc_l or "malware" in ll or "behavior monitoring" in desc_l
+            or "startup program" in desc_l or "persistence" in ll or "new startup" in desc_l):
+        return [
+            f"A new startup/autorun program was created on endpoint {host}, which could allow an "
+            "application to execute automatically every time the system starts (persistence).",
+            "Based on the available logs there is no evidence of a confirmed malware infection or "
+            "endpoint compromise; the activity requires validation before closure.",
+        ]
+    if "phish" in desc_l or "phish" in ll:
+        return [f"User {username or 'the user'} on host {host} accessed a site categorised as phishing, "
+                "which could lead to credential theft or malware delivery if interacted with."]
+    if "ip feed" in ll or "permit" in ll or "cti" in ll:
+        return [f"A connection involving {src_ip or 'the source host'} and {dst_ip or 'an external IP'} "
+                "matched a threat-intel feed; if successful it could indicate C2 or malicious communication."]
+    if "vpn" in ll or "brute" in ll or ("multiple" in desc_l and "fail" in desc_l):
+        return [f"Repeated authentication activity from {src_ip or 'the source IP'} may indicate an "
+                "account-takeover or brute-force attempt against the affected account."]
+    if "sql" in ll or "dam" in ll or "database" in ll:
+        return [f"A database command was executed against {dst_ip or 'the target DB'}; if unauthorised it "
+                "could impact data integrity or availability."]
+    return []
+
+
 def build_mssp_report(offense: dict, similar: list[dict] | None = None,
                       iocs: dict | None = None, mitre: list[dict] | None = None,
                       risk: int | None = None, ti: dict | None = None,
@@ -669,6 +699,8 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     src_ip = _first(offense.get("source_ips")) or payload_kv.get("source_ip")
     dst_ip = _first(offense.get("destination_ips")) or payload_kv.get("destination_ip")
     username = _first(offense.get("usernames")) or payload_kv.get("username")
+    if not machine_id and payload_kv.get("host"):
+        machine_id = payload_kv["host"]
 
     # Date formatting: "21 Jul 2026, 09:29:58"
     from datetime import datetime as _dt
@@ -709,6 +741,13 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if payload_kv.get("protocol"): pkv_fields.append(("Protocol", payload_kv["protocol"]))
     if payload_kv.get("action"): pkv_fields.append(("Action", payload_kv["action"]))
     if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
+    if payload_kv.get("process"): pkv_fields.append(("Process", payload_kv["process"]))
+    if payload_kv.get("file_path"): pkv_fields.append(("File Path", payload_kv["file_path"]))
+    if payload_kv.get("registry"): pkv_fields.append(("Registry", payload_kv["registry"]))
+    if payload_kv.get("host"): pkv_fields.append(("Host", payload_kv["host"]))
+    if payload_kv.get("operation"): pkv_fields.append(("Operation", payload_kv["operation"]))
+    if payload_kv.get("risk_level"): pkv_fields.append(("Risk Level", payload_kv["risk_level"]))
+    if payload_kv.get("event_type"): pkv_fields.append(("Event Type", payload_kv["event_type"]))
     if payload_kv.get("application"): pkv_fields.append(("Application", payload_kv["application"]))
     if payload_kv.get("bytes"): pkv_fields.append(("Bytes", payload_kv["bytes"]))
     if payload_kv.get("post_nat_source_ip"): pkv_fields.append(("Post NAT Source IP", payload_kv["post_nat_source_ip"]))
@@ -775,6 +814,8 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
         "log_source": log_source_str,
         "fields": fields,
         "analysis_lines": analysis_lines,
+        "impact_lines": _generate_impact_lines(offense, events, payload_kv, src_ip, dst_ip,
+                                                username, machine_id),
         "verdict": verdict,
         "verdict_reason": verdict_reason,
         "recommendations": recommendations,
@@ -858,6 +899,33 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
             if "action" in lbl.lower():
                 action = val
                 break
+
+    # CEF custom-string label/value pairs (csNLabel=Rule_Name  csN=New Startup Program).
+    cef_labeled: dict[str, str] = {}
+    for k in list(kv):
+        lm = _re.fullmatch(r"(cs\d+|cn\d+|c6a\d+|flexstring\d+)label", k)
+        if lm and kv.get(lm.group(1)):
+            lbl = kv[k].strip().lower().replace(" ", "_").replace("-", "_")
+            cef_labeled[lbl] = kv[lm.group(1)]
+
+    # Endpoint/EDR artifacts (Trend Micro Apex, Sysmon, CEF): process image, file path,
+    # registry autorun target and detected host — needed to ground malware/persistence alerts.
+    proc = pick("sproc", "deviceprocessname", "dproc", "process", "image", "processname")
+    file_path = None
+    if proc and ("\\" in proc or "/" in proc or proc.lower().endswith(".exe") or proc.lower().endswith(".tmp")):
+        file_path = proc
+    file_path = file_path or pick("filepath", "fpath", "filename", "fname")
+    registry = pick("tmcmlogtarget", "targetobject", "registry")
+    if not registry:
+        rm = IOC_PATTERNS["registry"].search(text)
+        registry = rm.group(0) if rm else None
+    if registry and not _re.match(r"(?i)HK(LM|CU|CR|U|CC)\\", registry):
+        registry = None
+    host = pick("tmcmlogdetectedhost", "shost", "computername", "hostname", "dvchost")
+    if host and _re.fullmatch(r"[0-9.]+", host):
+        host = None
+    domain = pick("dntdom", "devicentdomain", "ntdomain")
+
     # Structured event fields take priority, then payload key=value, then description text.
     out = {
         "source_ip": ev_get("sourceip", "source_ip") or pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
@@ -866,7 +934,15 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
         "destination_port": ev_get("destinationport") or pick("dstport", "destination_port", "dport", "dpt"),
         "protocol": proto,
         "action": action,
-        "rule_name": pick("rule_name", "rulename"),
+        "rule_name": cef_labeled.get("rule_name") or pick("rule_name", "rulename"),
+        "process": proc,
+        "file_path": file_path,
+        "registry": registry,
+        "host": host,
+        "operation": cef_labeled.get("operation"),
+        "risk_level": cef_labeled.get("risk_level"),
+        "event_type": cef_labeled.get("event_type"),
+        "domain": domain,
         "username": ev_get("username") or pick("usrname", "username", "user", "suser", "duser", "account_name", "src_user"),
         "application": ev_get("application", "app") or pick("app", "application", "appname", "requestclientapplication"),
         "bytes": pick("bytes", "byte", "in", "out", "bytesin", "bytesout"),
@@ -1031,8 +1107,27 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
         l2 = f"User '{username}' from host {src_ip} uploaded content to {url or dst_ip}."
     elif "usb" in ll or "removable" in ll:
         l2 = f"User '{username}' wrote files to a removable device on host {machine_id or src_ip}."
+    elif ("virus" in lower_desc or "malware" in ll or "behavior monitoring" in lower_desc
+          or "startup program" in lower_desc or "persistence" in ll or "autostart" in payloads.lower()
+          or "autorun" in payloads.lower()):
+        pkv = _parse_payload_kv(events, offense)
+        fpath = pkv.get("file_path") or pkv.get("process")
+        reg = pkv.get("registry")
+        act = pkv.get("action")
+        op = pkv.get("operation")
+        host = machine_id or pkv.get("host") or src_ip
+        seg = f"{log_source_str.split('@')[0].strip() if log_source_str else 'The endpoint security tool'} detected a Behavior Monitoring event on host {host}"
+        if reg:
+            seg += f", where a new startup/autorun entry was {'written to ' if op else 'added under '}the registry key {reg}"
+        if fpath:
+            seg += f", pointing to the file {fpath} located in the user's directory"
+        if act:
+            seg += f"; the device action taken was '{act}', meaning the tool detected and evaluated the activity per policy without automatically blocking it"
+        l2 = seg + "."
     elif event_name:
-        l2 = (f"The event '{event_name}' was observed for user '{username}' from {src_ip} to {dst_ip}"
+        who = f"user '{username}'" if username and str(username).lower() != "none" else "the endpoint"
+        dst_seg = f" to {dst_ip}" if dst_ip else ""
+        l2 = (f"The event '{event_name}' was observed for {who} from {src_ip}{dst_seg}"
               + (f" via {log_source_str}" if log_source_str else "") + ".")
     else:
         l2 = f"Rule(s) triggered: {', '.join(rules) or 'unspecified'}."
@@ -1128,12 +1223,22 @@ def _generate_recommendations(offense, verdict, iocs, mitre, username, src_ip, d
             recs.append(f"Contact {who} to confirm whether the cloud upload was work-related; request the file name and business justification.")
             recs.append("Confirm the file's data classification with the data owner; if confidential, block and educate the user.")
             recs.append("Escalate to L2 if the file classification is Confidential/Restricted or the user cannot justify the upload.")
+        elif ("virus" in desc_l or "malware" in rule_l or "behavior monitoring" in desc_l
+              or "startup program" in desc_l or "persistence" in rule_l or "new startup" in desc_l):
+            pkv = _parse_payload_kv(offense.get("events") or [], offense)
+            fpath = pkv.get("file_path") or pkv.get("process")
+            reg = pkv.get("registry")
+            fname = (fpath.replace("/", "\\").split("\\")[-1] if fpath else None) or "the detected file"
+            recs.append(f"Verify whether {fname} is associated with a legitimate software installation or update on {host}.")
+            recs.append(f"Review the endpoint startup entries, registry autorun locations{f' (e.g. {reg})' if reg else ''} and scheduled tasks to determine whether persistence was successfully established.")
+            recs.append(f"Perform a full antivirus and EDR scan on endpoint {host} to identify any additional suspicious activity.")
+            recs.append(f"If {fname} is confirmed to be unauthorized or malicious, remove the persistence mechanism and delete the file from the endpoint.")
         else:
             recs.append(f"Verify with {who} and the asset owner of {host} that the activity is legitimate/expected.")
             recs.append(f"Add {src_ip or who} to enhanced monitoring for the next 24 hours; alert on repeated triggers.")
             recs.append("If activity is not confirmed benign within SLA, escalate to L2 for deeper analysis.")
 
-    return recs[:3]
+    return recs[:4]
 
 
 # ---------- Attack Path Replay (narrative story steps) ----------
