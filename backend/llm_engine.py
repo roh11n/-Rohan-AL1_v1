@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -73,11 +74,81 @@ def _load(model_name: str) -> tuple[Any, Any] | None:
 
 
 # --------------------------------------------------------------------------- #
+# OpenRouter (cloud) inference                                                #
+# --------------------------------------------------------------------------- #
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _openrouter_chat(model_name: str, messages: list[dict], max_new_tokens: int,
+                     temperature: float, api_key: str) -> str | None:
+    """OpenAI-compatible chat completion via OpenRouter. Returns assistant text.
+
+    Tries the configured model then falls back to the resilient `openrouter/free`
+    auto-router if the primary provider is rate-limited/unavailable upstream.
+    """
+    primary = (os.environ.get("OPENROUTER_MODEL") or model_name
+               or "openrouter/free").strip()
+    candidates = [primary]
+    if "openrouter/free" not in candidates:
+        candidates.append("openrouter/free")
+    try:
+        import httpx  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        logger.warning("httpx unavailable for OpenRouter: %s", e)
+        return None
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://socpilot.ai",
+        "X-Title": "SOCPilot",
+    }
+    for model in candidates:
+        for attempt in range(2):
+            try:
+                resp = httpx.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "max_tokens": max_new_tokens,
+                        "temperature": max(0.0, temperature),
+                    },
+                    timeout=120.0,
+                )
+                if resp.status_code == 429:
+                    logger.warning("OpenRouter 429 for %s (attempt %d) — retrying/falling back.",
+                                   model, attempt + 1)
+                    time.sleep(2 + attempt * 3)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                choice = (data.get("choices") or [{}])[0]
+                content = (choice.get("message") or {}).get("content") or ""
+                content = _THINK_RE.sub("", content).strip()
+                if content:
+                    return content
+            except Exception as e:  # noqa: BLE001
+                logger.warning("OpenRouter inference error (%s): %s", model, e)
+                break
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Inference primitive                                                         #
 # --------------------------------------------------------------------------- #
 def _chat_once(model_name: str, messages: list[dict], max_new_tokens: int,
                temperature: float) -> str | None:
-    """Single chat-format inference. Returns generated text (assistant reply)."""
+    """Single chat-format inference.
+
+    When OPENROUTER_API_KEY is set, inference is served by the OpenRouter cloud
+    API (OpenAI-compatible) using OPENROUTER_MODEL. Otherwise it falls back to the
+    local HuggingFace transformers model. Returns generated text (assistant reply).
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if api_key:
+        return _openrouter_chat(model_name, messages, max_new_tokens,
+                                temperature, api_key)
     loaded = _load(model_name)
     if not loaded:
         return None
@@ -745,6 +816,17 @@ _ECHO_RE = re.compile(
     r"(?i)^(source|destination|dest|external|internal|remote)?\s*(ip( address)?|port( number)?|user(-agent| account|name)?|"
     r"host(name)?|log source|proxy( server)?|dns( server)?|protocol|action|process|parent process|command line|"
     r"file (hash|name|path)|sha256|md5|domain|url|asset|application|event name|time(stamp)?)\s*:\s*\S.{0,80}$")
+# Reasoning-model leakage: some cloud models echo the task/their own chain-of-thought as
+# plain content (not <think> tags). Drop any line that talks about the instructions itself.
+_META_RE = re.compile(
+    r"(?i)(\bwe need to\b|\bthe user\b|\buser (wants|said|asked)\b|\blet'?s\b|\bi (will|should|need|'ll)\b|"
+    r"\bmust (explain|output|not mention|use|write|start|include|mention|name|reference|state|describe)\b|"
+    r"\beach (bullet |line )?start(s|ing)? with\b|\bin every bullet\b|"
+    r"\bno (json|headings?|field names|key=value|raw payload|other sections)\b|"
+    r"\bonly the (analysis|impact|recommendations?) section\b|\b(analysis|impact|recommendations?) section\b|"
+    r"\bartifact values\b|\bplain[- ]english\b|\bas an? (ai|assistant|language model)\b|"
+    r"\bon separate lines?\b|\bwrite exactly\b|verdict\s*:\s*<|reason\s*:\s*<|<(tp|fp|one |a )|"
+    r"^(okay|sure|certainly|here('| i)s|below is|based on the (instructions?|prompt)))")
 
 
 def _section_bullets(reply: str | None, min_words: int = 4) -> list[str]:
@@ -755,7 +837,7 @@ def _section_bullets(reply: str | None, min_words: int = 4) -> list[str]:
     rows = []
     for ln in re.split(r"\r?\n", t):
         c = _clean_line(ln)
-        if not c or _STOP_RE.match(c) or _JUNK_RE.search(c):
+        if not c or _STOP_RE.match(c) or _JUNK_RE.search(c) or _META_RE.search(c):
             continue
         if re.match(r"(?i)^(analysis|impact|recommendations?|verdict|reason)\s*:", c):
             c = re.sub(r"(?i)^(analysis|impact|recommendations?)\s*:\s*", "", c).strip()
@@ -764,7 +846,8 @@ def _section_bullets(reply: str | None, min_words: int = 4) -> list[str]:
         rows.append(c)
     if len(rows) <= 1 and t.strip():
         blob = _clean_line(t.replace("\n", " "))
-        rows = [x.strip() for x in re.split(r"(?<=[.;])\s+", blob) if x.strip()]
+        rows = [_clean_line(x) for x in re.split(r"(?<=[.;])\s+", blob) if x.strip()]
+    rows = [r for r in rows if not _META_RE.search(r)]
     rows = _sanitize_bullets(rows)
     detail_prefix = re.compile(r"(?i)^(action|detail|details|steps?)\s*:\s*")
     tagged = [(bool(detail_prefix.match(r)), detail_prefix.sub("", r)) for r in rows]
@@ -803,7 +886,7 @@ def _verdict_from(reply: str | None) -> tuple[str, str]:
     rm = re.search(r"(?i)\bREASON\b\s*:?\s*(.+)", reply)
     reason = _clean_line(re.split(r"\r?\n", rm.group(1))[0]) if rm else ""
     reason = reason.lstrip("*:- ").strip()
-    reason = "" if _JUNK_RE.search(reason) else reason[:600]
+    reason = "" if (_JUNK_RE.search(reason) or _META_RE.search(reason) or "<" in reason) else reason[:600]
     return v, reason
 
 
@@ -878,7 +961,9 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
         r_reply = ask(
             "Write ONLY the RECOMMENDATIONS section: 3-5 bullets, each starting with '- ', each a "
             "specific remediation/containment/investigation action applied to THIS offense's artifacts. "
-            "Then on separate lines write exactly:\nVERDICT: <TP or FP or Suspicious>\nREASON: <one technical sentence>", 260)
+            "After the bullets, add two final lines. First line: the word VERDICT followed by a colon and "
+            "one of TP, FP or Suspicious. Second line: the word REASON followed by a colon and one short "
+            "technical sentence justifying the verdict.", 260)
 
         def polish(items):
             out_ = []

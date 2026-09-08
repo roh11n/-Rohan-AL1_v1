@@ -151,7 +151,11 @@ export const MsspReport = ({ report, testId = "mssp-report", onFieldClick, offen
               {report.generated_by.startsWith("kb-template")
                 ? `KB Template${report.kb_template_score ? ` · ${report.kb_template_score}%` : ""}`
                 : report.generated_by.startsWith("llm")
-                  ? "Local LLM"
+                  ? (report.generated_by.includes("openrouter")
+                      ? "Cloud LLM · OpenRouter"
+                      : report.generated_by.includes(":")
+                        ? `LLM · ${report.generated_by.split(":").slice(1).join(":").split("/").pop()}`
+                        : "Local LLM")
                   : "Rule Engine"}
             </span>
           )}

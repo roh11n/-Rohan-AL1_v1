@@ -73,3 +73,10 @@ Known non-blocking (pre-existing, not in this bug report): risk-donut overlaps C
 ### Backlog
 - P1: larger local model option (Qwen2.5-3B) if RAM/disk allow; file-hash VT enrichment for malware alerts.
 - P2: secondary TI (OTX/AbuseIPDB); KB match insight panel (which sentences were learned/used).
+
+## Update 2026-06 (c) — Triage moved to OpenRouter cloud (free model)
+- LLM inference for MSSP report triage now runs on OpenRouter (OpenAI-compatible) instead of the local CPU Qwen. Configured via backend/.env `OPENROUTER_API_KEY` + `OPENROUTER_MODEL` (default `openrouter/free` auto-router — resilient to upstream per-provider rate limits).
+- `llm_engine._chat_once` routes to `_openrouter_chat` (httpx, 429 retry + `openrouter/free` fallback, strips `<think>` reasoning) when the key is set; otherwise falls back to local transformers. `<think>` blocks and reasoning/instruction-echo lines are filtered.
+- `llm_engine._section_bullets` + `_verdict_from` gained `_META_RE` filtering to drop reasoning-model leakage (e.g. "We need to output the ANALYSIS section", "each starting with '- '", "REASON: <one technical sentence>") and placeholder echoes.
+- LLMSettings defaults changed to provider=`openrouter`, model=`openrouter/free`, analysis_mode=`llm`, enable_llm=true. Startup migration flips the global settings to the OpenRouter model when the key is present.
+- Verified end-to-end on 3 offenses via external API: reports return `generated_by=llm:openrouter/free`, grounded technical Analysis/Recommendations, clean verdict+reason, no meta leaks. Report quality is markedly higher than the 0.5B local model.

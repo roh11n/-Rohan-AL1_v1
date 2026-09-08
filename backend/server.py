@@ -365,6 +365,20 @@ async def _startup():
     if not await db.settings.find_one({"id": "global"}):
         await db.settings.insert_one(Settings().model_dump())
 
+    # When OpenRouter is configured, triage runs on the cloud free model: ensure the
+    # global settings use LLM mode with that model (migrates pre-existing kb/local seeds).
+    if os.environ.get("OPENROUTER_API_KEY", "").strip():
+        or_model = os.environ.get("OPENROUTER_MODEL", "openrouter/free").strip()
+        await db.settings.update_one(
+            {"id": "global"},
+            {"$set": {
+                "llm.provider": "openrouter",
+                "llm.analysis_mode": "llm",
+                "llm.enable_llm": True,
+                "llm.model_name": or_model,
+            }},
+        )
+
     # One-time migration: fix stale 'Custom Rule Engine' (CRE) log sources on offenses
     # that were investigated before the real-log-source fix. Recompute from the events.
     from soc_engine import _extract_log_source, _is_cre_source, _extract_field, _first
@@ -901,6 +915,8 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     await _audit(user["email"], "investigate", "offense", offense_id, {"risk": analysis["risk_score"]})
     if schedule_llm:
         model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-0.5B-Instruct"
+        if os.environ.get("OPENROUTER_API_KEY", "").strip():
+            model_name = os.environ.get("OPENROUTER_MODEL") or model_name
         timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 240)
         temperature = float(llm_cfg.get("temperature") or 0.3)
         # Base for the LLM = the report just built (KB-template when a use-case matched,

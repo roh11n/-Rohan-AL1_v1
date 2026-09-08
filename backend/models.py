@@ -177,15 +177,15 @@ class QRadarSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    provider: str = "local"  # local | huggingface | ollama
-    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
-    analysis_mode: str = "kb"  # kb (deterministic template) | llm (local Qwen)
+    provider: str = "openrouter"  # openrouter (cloud) | local | huggingface | ollama
+    model_name: str = "openrouter/free"
+    analysis_mode: str = "llm"  # kb (deterministic template) | llm (cloud/local model)
     endpoint_url: str = ""
     api_token: str = ""
     max_tokens: int = 512
     temperature: float = 0.3
-    enable_llm: bool = False  # legacy flag; analysis_mode drives behaviour
-    llm_step_timeout_seconds: int = 90  # per-step timeout for LLM inference (CPU)
+    enable_llm: bool = True  # legacy flag; analysis_mode drives behaviour
+    llm_step_timeout_seconds: int = 90  # per-step timeout for LLM inference
 
 
 class IntegrationCred(BaseModel):
