@@ -639,9 +639,27 @@ def _generate_impact_lines(offense, events, payload_kv, src_ip, dst_ip,
     if "phish" in desc_l or "phish" in ll:
         return [f"User {username or 'the user'} on host {host} accessed a site categorised as phishing, "
                 "which could lead to credential theft or malware delivery if interacted with."]
-    if "ip feed" in ll or "permit" in ll or "cti" in ll:
-        return [f"A connection involving {src_ip or 'the source host'} and {dst_ip or 'an external IP'} "
-                "matched a threat-intel feed; if successful it could indicate C2 or malicious communication."]
+    if ("ip feed" in ll or "ip feed" in desc_l or "cti" in desc_l or "cti" in ll
+            or ("permit" in (desc_l + " " + ll) and ("feed" in desc_l or "cti" in desc_l))):
+        outbound = "outbound" in desc_l
+        nat_ip = (payload_kv or {}).get("nat_destination_ip")
+        if outbound:
+            return [
+                f"An internal host ({src_ip or 'source host'}) established communication with a "
+                f"CTI-listed external IP address ({dst_ip or 'external IP'}).",
+                "The observed activity may indicate malware command-and-control, data exfiltration, or "
+                "communication with a known-malicious host.",
+                "Since the connection was permitted by firewall policy, the internal host successfully "
+                "reached the external malicious IP.",
+            ]
+        return [
+            f"A CTI-listed IP address ({src_ip or 'the source IP'}) was able to establish communication "
+            f"with an internally hosted service{f' ({nat_ip})' if nat_ip else ''} exposed through the firewall.",
+            "The observed activity may indicate reconnaissance, scanning, service enumeration, or "
+            "attempted exploitation against the exposed application.",
+            "Since the connection was permitted by firewall policy, the destination host was reachable "
+            "from the external source IP.",
+        ]
     if "vpn" in ll or "brute" in ll or ("multiple" in desc_l and "fail" in desc_l):
         return [f"Repeated authentication activity from {src_ip or 'the source IP'} may indicate an "
                 "account-takeover or brute-force attempt against the affected account."]
@@ -741,6 +759,13 @@ def build_mssp_report(offense: dict, similar: list[dict] | None = None,
     if payload_kv.get("protocol"): pkv_fields.append(("Protocol", payload_kv["protocol"]))
     if payload_kv.get("action"): pkv_fields.append(("Action", payload_kv["action"]))
     if payload_kv.get("rule_name"): pkv_fields.append(("Rule Name", payload_kv["rule_name"]))
+    if payload_kv.get("policy_name") and payload_kv.get("policy_name") != payload_kv.get("rule_name"):
+        pkv_fields.append(("Policy Name", payload_kv["policy_name"]))
+    if payload_kv.get("source_zone"): pkv_fields.append(("Source Zone", payload_kv["source_zone"]))
+    if payload_kv.get("dest_zone"): pkv_fields.append(("Destination Zone", payload_kv["dest_zone"]))
+    if payload_kv.get("session_id"): pkv_fields.append(("Session ID", payload_kv["session_id"]))
+    if payload_kv.get("session_end_reason"): pkv_fields.append(("Session End Reason", payload_kv["session_end_reason"]))
+    if payload_kv.get("packets"): pkv_fields.append(("Total Packets", payload_kv["packets"]))
     if payload_kv.get("process"): pkv_fields.append(("Process", payload_kv["process"]))
     if payload_kv.get("file_path"): pkv_fields.append(("File Path", payload_kv["file_path"]))
     if payload_kv.get("registry"): pkv_fields.append(("Registry", payload_kv["registry"]))
@@ -926,6 +951,18 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
         host = None
     domain = pick("dntdom", "devicentdomain", "ntdomain")
 
+    # Palo Alto / firewall session fields (zones, NAT, policy, session, packets).
+    def _nz(v):
+        return v if v not in (None, "", "0", "0.0.0.0") else None
+    nat_dst = (_nz(ev_get("postnatdestinationip"))
+               or pick("postnatdestinationip", "dnat", "postnatdst", "nat_destination_ip", "translateddst"))
+    src_zone = pick("srczone", "src_zone", "sourcezone", "source_zone", "fromzone", "from_zone", "szone")
+    dst_zone = pick("dstzone", "dst_zone", "destinationzone", "destination_zone", "tozone", "to_zone", "dzone")
+    policy_name = pick("policy_name", "policyname", "policy", "rule", "rulename", "rule_name", "sec_rule")
+    session_id = pick("session_id", "sessionid", "sessid", "session")
+    session_end = pick("session_end_reason", "sessionendreason", "reason", "sessendreason")
+    packets = pick("packets", "totalpackets", "total_packets", "pkts", "packets_total")
+
     # Structured event fields take priority, then payload key=value, then description text.
     out = {
         "source_ip": ev_get("sourceip", "source_ip") or pick("src", "source_ip", "sourceip", "source_address", "shost", "client_ip") or find_ip("source"),
@@ -935,6 +972,13 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
         "protocol": proto,
         "action": action,
         "rule_name": cef_labeled.get("rule_name") or pick("rule_name", "rulename"),
+        "policy_name": policy_name,
+        "source_zone": src_zone,
+        "dest_zone": dst_zone,
+        "nat_destination_ip": nat_dst,
+        "session_id": session_id,
+        "session_end_reason": session_end,
+        "packets": packets,
         "process": proc,
         "file_path": file_path,
         "registry": registry,
@@ -1039,6 +1083,76 @@ def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:
 
 
 # ---- Context-aware analysis + recommendation helpers ----
+def _cti_feed_analysis(offense, events, src_ip, dst_ip, dt_str, log_source_str):
+    """MSSP L1 narrative for CTI/threat-intel IP-feed firewall-permit offenses
+    (inbound or outbound). Field-driven: each sentence is emitted only when its
+    supporting artifact (zone/policy/NAT/session/bytes) is present in the event."""
+    pkv = _parse_payload_kv(events, offense)
+    desc = re.sub(r"\s+", " ", (offense.get("description") or "")).strip()
+    name = re.split(r"(?i)\s+containing\s+", desc)[0].strip() or desc
+    lower = desc.lower()
+    outbound = "outbound" in lower
+    inbound = ("inbound" in lower) or not outbound
+    direction_word = "inbound" if inbound else "outbound"
+    proto = pkv.get("protocol") or "TCP"
+    app = pkv.get("application")
+    dport = pkv.get("destination_port")
+    nat_ip = pkv.get("nat_destination_ip")
+    policy = pkv.get("policy_name") or pkv.get("rule_name")
+    szone = pkv.get("source_zone")
+    dzone = pkv.get("dest_zone")
+    action = pkv.get("action") or "Allow"
+    bytes_ = pkv.get("bytes")
+    packets = pkv.get("packets")
+    sess_reason = pkv.get("session_end_reason")
+    fw = None
+    if log_source_str and not _is_cre_source(log_source_str):
+        fw = log_source_str.split("::")[0].strip()
+
+    lines: list[dict] = []
+    _n = [0]
+
+    def add(t):
+        _n[0] += 1
+        lines.append({"n": _n[0], "text": t})
+
+    when = f' on "{dt_str}"' if dt_str else ""
+    add(f'We have observed an offense "{name}" triggered{when}.')
+    add(f'On {dt_str or "the reported time"}, an {direction_word} connection associated with a '
+        f'CTI-monitored IP address was observed' + (f' on firewall "{fw}"' if fw else "") + ".")
+
+    conn = (f'We observed a permitted {direction_word} {(app + " ") if app else ""}'
+            f'connection from source IP {src_ip} to destination')
+    if nat_ip:
+        conn += f' public IP {dst_ip}, which was translated to internal host {nat_ip}'
+    else:
+        conn += f' IP {dst_ip}'
+    conn += f' over {proto} port {dport}.' if dport else '.'
+    add(conn)
+
+    if policy:
+        add(f'The communication was allowed through firewall policy {policy}.')
+    if szone and dzone:
+        rel = "external-to-internal" if inbound else "internal-to-external"
+        add(f'The traffic originated from Source Zone {szone} and was directed towards '
+            f'Destination Zone {dzone}, indicating {rel} network communication.')
+    add(f'The firewall action was recorded as {action}, confirming that the connection was '
+        'permitted based on the configured security policy.')
+    matched_ip = src_ip if inbound else dst_ip
+    add(f'The offense was generated because the {"source" if inbound else "destination"} IP '
+        f'{matched_ip} matched an indicator present within the configured Threat Intelligence (CTI) feeds.')
+    if bytes_ or packets or sess_reason:
+        seg = "The session"
+        if bytes_:
+            seg += f" exchanged {bytes_}"
+        if packets:
+            seg += (" across" if bytes_ else " comprised") + f" {packets} packets"
+        if sess_reason:
+            seg += f" and was logged with Session End Reason: {sess_reason}"
+        add(seg + ".")
+    return lines
+
+
 def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
                              src_ip, dst_ip, username, event_name, failure_reason,
                              error_code, log_source_str, machine_id, dt_str):
@@ -1053,6 +1167,14 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
     desc = offense.get("description") or "Offense"
     rules = offense.get("rules") or []
     lines: list[dict] = []
+    lower_desc = desc.lower()
+    ll = " ".join((offense.get("categories") or []) + rules).lower()
+
+    # CTI IP-feed firewall permit (inbound/outbound) — dedicated MSSP narrative.
+    if ("cti" in lower_desc or "ip feed" in lower_desc or "ip feeds" in lower_desc
+            or "ip feed" in ll or "rbi_ioc" in ll
+            or ("permit" in (lower_desc + " " + ll) and ("feed" in lower_desc or "cti" in lower_desc))):
+        return _cti_feed_analysis(offense, events, src_ip, dst_ip, dt_str, log_source_str)
 
     # Line 1 — canonical opener
     when = f" on {dt_str}" if dt_str else ""
@@ -1060,8 +1182,6 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
 
     # Line 2 — technical detail sentence, tailored by category / evidence
     l2 = None
-    lower_desc = desc.lower()
-    ll = " ".join((offense.get("categories") or []) + rules).lower()
     payloads = " ".join([str(e.get("payload") or "") for e in events])
 
     if "sql" in ll or "dam" in ll or "database" in ll:
@@ -1155,14 +1275,9 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
         lines.append({"n": 3, "text": "On checking the logs for the user we have observed success logins after the failed ones. Kindly check the legitimacy of the user."})
     elif kb_hint:
         lines.append({"n": 3, "text": kb_hint})
-    elif similar:
-        top = similar[0]
-        lines.append({"n": 3, "text": f"Historical similar incident found (similarity {top.get('similarity')}%); previous outcome: '{top.get('recommendation') or 'monitor'}'."})
-    else:
-        lines.append({"n": 3, "text": "No corroborating success events or matching historical incidents were found within the offense window."})
 
     # Line 4 — closing call to action
-    lines.append({"n": 4, "text": "Verify the legitimacy of the alert with the affected user/host owner before closing."})
+    lines.append({"n": len(lines) + 1, "text": "Verify the legitimacy of the alert with the affected user/host owner before closing."})
     return lines
 
 
@@ -1177,6 +1292,19 @@ def _generate_recommendations(offense, verdict, iocs, mitre, username, src_ip, d
     ext_ip = _first(iocs.get("ipv4_external"))
 
     recs: list[str] = []
+    # CTI / threat-intel IP-feed firewall-permit — dedicated recommendations (verdict-agnostic).
+    if ("cti" in desc_l or "ip feed" in desc_l or "ip feed" in rule_l or "rbi_ioc" in rule_l
+            or ("permit" in (desc_l + " " + rule_l) and ("feed" in desc_l or "cti" in desc_l))):
+        pkv = _parse_payload_kv(offense.get("events") or [], offense)
+        outbound = "outbound" in desc_l
+        cti_ip = (dst_ip if outbound else src_ip) or ext_ip or "the flagged IP"
+        policy = pkv.get("policy_name") or pkv.get("rule_name")
+        recs.append(f"Kindly block the IP address {cti_ip}, if there is no legitimate business requirement.")
+        recs.append(f"Verify whether communication {'to' if outbound else 'from'} {cti_ip} is expected and "
+                    "associated with any approved business application, partner integration, or external service.")
+        recs.append(f"Review the firewall rule {policy or 'associated with this connection'} and ensure access "
+                    "is restricted to authorized source networks wherever possible.")
+        return recs
     if verdict == "TP":
         if "ransom" in desc_l or "T1486" in ttypes:
             recs.append(f"Isolate {host} from the network immediately (switch-level MAC block) and capture a memory image + disk image before shutdown.")

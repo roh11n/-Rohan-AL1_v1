@@ -717,8 +717,17 @@ def _is_public_ip(ip) -> bool:
 
 
 def _pick_external_ip(base_mssp: dict, offense: dict, extra_ips=None):
-    cands = list(extra_ips or [])
-    cands += [(base_mssp or {}).get("destination_ip"), (base_mssp or {}).get("source_ip")]
+    desc = (offense.get("description") or "").lower()
+    def _f(lst):
+        return (lst or [None])[0] if lst else None
+    src = (base_mssp or {}).get("source_ip") or _f(offense.get("source_ips"))
+    dst = (base_mssp or {}).get("destination_ip") or _f(offense.get("destination_ips"))
+    # For inbound CTI/permit offenses the flagged indicator is the SOURCE; for outbound it's the DESTINATION.
+    if "inbound" in desc:
+        ordered = [src, dst]
+    else:
+        ordered = [dst, src]
+    cands = ordered + list(extra_ips or [])
     cands += list(offense.get("source_ips") or []) + list(offense.get("destination_ips") or [])
     for ip in cands:
         if _is_public_ip(ip):
@@ -750,11 +759,10 @@ async def _vt_ioc_enrichment(offense: dict, base_mssp: dict, ti_cfg: dict,
     rep = f"{r.get('malicious', 0)} malicious / {r.get('suspicious', 0)} suspicious"
     url = f"https://www.virustotal.com/gui/ip-address/{ip}"
     lines = [
-        f"Source IP {ip} was reviewed.",
-        f"The IP belongs to {r.get('as_owner') or 'an unknown provider'}.",
+        f"We have reviewed the IP address \"{ip}\" against the threat intelligence tool (VirusTotal).",
+        f"The IP reputation is {rep} and it belongs to {r.get('as_owner') or 'an unknown provider'}.",
         f"Geolocation: {r.get('country') or 'Unknown'}.",
-        f"Reputation score: {rep}.",
-        "IOC References: VirusTotal",
+        "IOC Reference Link:",
     ]
     return {
         "source_ip": ip, "ip": ip,
@@ -954,12 +962,25 @@ async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: l
             ai["mssp_report_source"] = "llm"
             ai["llm_status"] = "done"
         else:
-            reason = llm_engine.load_error() or "invalid_output_or_timeout"
-            ai["llm_status"] = "failed"
-            if ai.get("mssp_report"):
-                ai["mssp_report"]["llm_status"] = "failed"
-                ai["mssp_report"]["llm_error"] = reason
-            logger.warning("Background LLM report unavailable for %s: %s", offense_id, reason)
+            # CTI/IP-feed offenses intentionally use the deterministic analyst template
+            # (llm_engine returns None on purpose) — this is not a failure.
+            _desc_l = str(doc.get("description") or "").lower()
+            template_bypass = ("cti" in _desc_l or "ip feed" in _desc_l or "ip feeds" in _desc_l
+                               or "rbi_ioc" in _desc_l
+                               or ("permit" in _desc_l and ("feed" in _desc_l or "cti" in _desc_l)))
+            if template_bypass:
+                ai["llm_status"] = "done"
+                ai["mssp_report_source"] = "rule-engine"
+                if ai.get("mssp_report"):
+                    ai["mssp_report"]["llm_status"] = "done"
+                    ai["mssp_report"].pop("llm_error", None)
+            else:
+                reason = llm_engine.load_error() or "invalid_output_or_timeout"
+                ai["llm_status"] = "failed"
+                if ai.get("mssp_report"):
+                    ai["mssp_report"]["llm_status"] = "failed"
+                    ai["mssp_report"]["llm_error"] = reason
+                logger.warning("Background LLM report unavailable for %s: %s", offense_id, reason)
         await db.offenses.update_one({"id": offense_id},
                                      {"$set": {"ai_analysis": ai, "last_updated": _now()}})
     except Exception as e:  # noqa: BLE001

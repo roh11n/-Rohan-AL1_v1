@@ -1,0 +1,42 @@
+{
+  "summary": "Validated the CTI-inbound MSSP report for offense b3d62492-eec6-458b-b090-d2264b3cacad (IND-UC-00317 Permit Connections CTI_IP Feeds Inbound) and regression-tested UC-00508 (0d75ac25-...). Wrote /app/backend/tests/test_iteration_17.py (2 tests, both PASS in ~48s). Also verified the frontend rendering with Playwright (login as admin, open offense detail, click 'mssp report' tab). Backend assertions: (a) Analysis contains the required 6 sentences — opens with 'We have observed an offense \"IND-UC-00317-Permit Connections CTI_IP Feeds Inbound\" triggered on ...', mentions inbound CTI-monitored IP on firewall 'Check Point @ 172.20.2.70', describes permitted inbound TCP/264 from 194.165.16.163 to 115.113.135.130 translated to internal host 115.113.135.131, mentions firewall policy 'Implied Rule', action 'Accept', and 'source IP 194.165.16.163 matched an indicator present within the configured Threat Intelligence (CTI) feeds'; (b) Impact is exactly 3 lines (CTI-listed IP -> internally hosted service, reconnaissance/scanning/enumeration/exploitation, permitted -> destination reachable); (c) Recommendations is exactly 3 lines (block IP 194.165.16.163, verify communication from 194.165.16.163, review firewall rule 'Implied Rule' restrict to authorized sources); (d) Fields include Source Port (25749), Destination Port (264), Protocol (TCP), Action (Accept), Rule Name (Implied Rule) — NO duplicate Policy Name==Rule Name and NO duplicate Destination NAT IP==Post NAT Destination IP (only Post NAT Destination IP rendered); (e) 'Historical similar incident' text is absent from analysis and full report; (f) ai_analysis.llm_status == 'done' and mssp_report_source == 'rule-engine' (deterministic template used; OpenRouter LLM bypassed as designed). Frontend: On /offenses/b3d62492-... MSSP tab, sorted data-testid Y positions confirm section order: fields (offense-mssp-report-x_* incl. x_source_port, x_destination_port, x_protocol, x_action, x_rule_name, x_post_nat_destination_ip) -> analysis (line-1..line-6) -> impact (impact-0..impact-2) -> recommendations (rec-0..rec-2) -> verdict. IOC Enrichment section absent (VirusTotal disabled — expected). Regression: UC-00508 (offense 0d75ac25-...) still produces grounded analysis containing HKCU\\Software\\...\\Run\\Figma Agent, figma_agent.exe, host LTWGSLVAP1424, action Assess; impact non-empty and persistence-aware; >=3 recommendations; no 'Historical similar incident' string.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Layout (all pages)", "issues": ["Console hydration warning: <span> inside <option> in Layout.jsx tenant/client <select> at line 122 — cosmetic React hydration warning, does not affect MSSP report functionality. Also recurring Recharts warning 'width(-1) and height(-1) of chart should be greater than 0' on dashboard container mount."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_17.py",
+    "/app/test_reports/pytest/iter17.xml"
+  ],
+  "action_items": [
+    "(Optional / low-priority) Fix Layout.jsx line 122: remove the extra <span data-ve-dynamic=\"true\"> wrapper inside <option> to eliminate the React hydration warning."
+  ],
+  "critical_code_review_comments": [
+    "soc_engine._cti_feed_analysis produces a deterministic, well-structured 6-sentence analyst narrative that fully matches the customer-supplied MSSP format for the CTI IP-feed inbound use case.",
+    "soc_engine._parse_payload_kv correctly extracts Check Point firewall fields (Source Port, Destination Port, Protocol, Action, Rule Name, Post NAT Destination IP) and de-duplicates Policy Name / Destination NAT IP that would otherwise duplicate Rule Name / Post NAT Destination IP.",
+    "server._pick_external_ip direction-aware handling correctly resolves 194.165.16.163 (source) as the CTI indicator for inbound offenses; downstream recommendations and impact reference the right IP.",
+    "llm_engine.build_llm_mssp_report_oneshot returning None for CTI/ip-feed offenses combined with server._run_llm_report_bg mapping that None to llm_status='done' is a clean way to bypass OpenRouter for deterministic use cases while keeping status semantics correct (not 'failed').",
+    "'Historical similar incident' correlation line has been globally removed from _generate_analysis_lines; regression verified for both CTI and UC-00508 offenses.",
+    "MsspReport.jsx section order (Fields -> Analysis -> Impact -> IOC Enrichment (conditional) -> Recommendations -> Verdict) matches the requested layout and is verified via testid Y positions in the browser."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_17.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (2/2 pytest tests in test_iteration_17.py)",
+    "frontend": "100% (section order + no 'Historical similar incident' verified via Playwright)"
+  },
+  "test_credentials": "admin@socpilot.ai / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — used pre-seeded offenses b3d62492-eec6-458b-b090-d2264b3cacad (CTI) and 0d75ac25-9714-4f42-a854-03af415d43ff (UC-00508).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "test_iteration_17.py is a stable regression for the CTI-inbound MSSP template. Reuses the analyst-template invariants (6 analysis sentences, 3 impact lines, 3 recommendations, dedupe of Policy/Rule Name and Destination NAT/Post-NAT, absence of 'Historical similar incident'). The CTI offense response is deterministic and near-instant (rule-engine, llm_status='done'). UC-00508 poll window is ~160s. Frontend testids follow pattern 'offense-mssp-report-*' (line-N, impact-N, rec-N, x_<field>, verdict-reason).",
+  "rca of the issue": "N/A — green-path validation. All requested behaviors (Analysis narrative content, exact Impact and Recommendation counts, firewall field extraction with dedupe, section order in UI, removal of Historical similar incident, llm_status='done' + rule-engine source for CTI, UC-00508 regression) are working as specified."
+}
