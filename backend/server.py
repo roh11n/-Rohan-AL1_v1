@@ -716,6 +716,14 @@ def _is_public_ip(ip) -> bool:
         str(ip))
 
 
+def _extract_uc_id(text: str | None) -> str | None:
+    """Pull a use-case id like 'IND-GLUC-10020' or 'IND-UC-00317' from offense text."""
+    if not text:
+        return None
+    m = re.search(r"[A-Za-z]{2,}-[A-Za-z]*UC-?\d+", text)
+    return m.group(0) if m else None
+
+
 def _pick_external_ip(base_mssp: dict, offense: dict, extra_ips=None):
     desc = (offense.get("description") or "").lower()
     def _f(lst):
@@ -855,6 +863,34 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
         same_uc = [e for e in manual_entries if kb_template.same_use_case(e, matched_kb)]
         matched_kb = kb_template.consolidate_entries(same_uc or [matched_kb])
         matched_kb["match_score"] = match_score
+
+    # No curated (manual) template? Fall back to the strongest RAG KB hit for THIS use
+    # case (uploaded historical KB lives only in the vector store), so the LLM still
+    # applies the analyst's historical analysis/impact/recommendation instead of a generic write-up.
+    rag_kb_ref = None
+    if not matched_kb and kb_matches:
+        top_sim = float(kb_matches[0].get("similarity") or 0)
+        uc = _extract_uc_id(doc.get("description") or "")
+        same_uc_hits = [m for m in kb_matches
+                        if uc and uc.lower() in (m.get("text") or "").lower()]
+        if top_sim >= 0.55 or same_uc_hits:
+            strong = [m for m in kb_matches[:6] if float(m.get("similarity") or 0) >= 0.42]
+            picked = (same_uc_hits + [m for m in strong if m not in same_uc_hits]) or kb_matches[:3]
+            joined = "\n\n".join((m.get("text") or "").strip() for m in picked[:5] if m.get("text"))
+            if joined:
+                rag_kb_ref = {
+                    "alert_name": (uc or doc.get("description") or "").strip(),
+                    "analysis": joined,
+                    "impact": None,
+                    "recommendations": [],
+                    "analysis_points": [],
+                    "impact_points": [],
+                    "recommendation_points": [],
+                    "ticket_count": len(picked),
+                    "verdict_counts": {},
+                    "match_score": int(top_sim * 100),
+                    "from_rag": True,
+                }
     rule_engine_mssp = (analysis or {}).get("mssp_report") or {}
 
     # Base report is always the rule-engine report (carries extracted fields);
@@ -906,6 +942,9 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
                 "verdict_counts": matched_kb.get("verdict_counts") or {},
                 "match_score": match_score,
             }
+        elif rag_kb_ref:
+            # Strong RAG KB hit for this use case: treat it as the authoritative reference.
+            kb_ref = rag_kb_ref
 
     updates = {
         "ai_analysis": analysis,

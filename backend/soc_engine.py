@@ -670,9 +670,13 @@ def _generate_impact_lines(offense, events, payload_kv, src_ip, dst_ip,
                     "compromise is expected; the block confirms the policy/threat category worked as intended."]
         return [f"Host {host} was able to reach {url or dst_ip}; if the destination is malicious this could "
                 "lead to malware delivery, credential theft or data exposure and requires validation."]
-    if "vpn" in ll or "brute" in ll or ("multiple" in desc_l and "fail" in desc_l):
-        return [f"Repeated authentication activity from {src_ip or 'the source IP'} may indicate an "
-                "account-takeover or brute-force attempt against the affected account."]
+    if "vpn" in ll or _is_login_failure(desc_l, ll):
+        return [
+            "Credential spraying or brute-force activity may result in unauthorized access if valid "
+            "credentials are discovered.",
+            f"Compromise of the targeted account could provide access to internal resources hosted on {host}.",
+            "Repeated failed authentication attempts may lead to account lockouts and service disruption.",
+        ]
     if "sql" in ll or "dam" in ll or "database" in ll:
         return [f"A database command was executed against {dst_ip or 'the target DB'}; if unauthorised it "
                 "could impact data integrity or availability."]
@@ -1113,6 +1117,23 @@ def _is_cti_feed(*texts) -> bool:
     return any(t and _CTI_FEED_RE.search(str(t)) for t in texts)
 
 
+_LOGON_TYPES = {"2": "Interactive", "3": "Network", "4": "Batch", "5": "Service",
+                "7": "Unlock", "8": "NetworkCleartext", "9": "NewCredentials",
+                "10": "RemoteInteractive/RDP", "11": "CachedInteractive"}
+_STATUS_MEANINGS = {
+    "0xc000006d": "a bad username or invalid authentication information",
+    "0xc000006a": "an incorrect password", "0xc0000064": "the username does not exist",
+    "0xc0000234": "the account is locked out", "0xc0000072": "the account is disabled",
+    "0xc0000193": "the account has expired", "0xc0000071": "the password has expired",
+    "0xc000015b": "the user is not allowed the requested logon type"}
+
+
+def _is_login_failure(*texts) -> bool:
+    j = " ".join(str(t or "").lower() for t in texts)
+    return ("brute" in j or "spray" in j or "login failure" in j or "logon failure" in j
+            or ("multiple" in j and ("fail" in j or "login" in j)))
+
+
 def _cti_feed_analysis(offense, events, src_ip, dst_ip, dt_str, log_source_str):
     """MSSP L1 narrative for CTI/threat-intel IP-feed firewall-permit offenses
     (inbound or outbound). Field-driven: each sentence is emitted only when its
@@ -1193,8 +1214,7 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
     Line 3: correlation/observation (success logins, historical KB match, IOC data)
     Line 4: verdict + verify-the-legitimacy call to action
     """
-    import html as _html
-    desc = offense.get("description") or "Offense"
+    desc = re.sub(r"\s+", " ", str(offense.get("description") or "Offense")).strip()
     rules = offense.get("rules") or []
     lines: list[dict] = []
     lower_desc = desc.lower()
@@ -1279,20 +1299,32 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
         l2 = (f"A web request from {who} on host {src_ip} to {url or dst_ip} was {verbed}"
               + (f" by {log_source_str}" if log_source_str else "") + ".")
         extra_lines = _grounded(exclude=("url", "action"))
-    elif "brute" in ll or ("multiple" in lower_desc and "fail" in lower_desc) or \
+    elif "brute" in ll or "spray" in ll or _is_login_failure(lower_desc, ll) or \
             ("fail" in ll and "logon" in str(event_name or "").lower()):
-        l2 = (f"Multiple failed authentication attempts were observed for user '{username}' "
-              f"from source IP {src_ip} against {dst_ip or host}.")
+        is_admin = ("admin" in str(username or "").lower() or "admin" in lower_desc
+                    or "administrator" in lower_desc)
+        acct = f"the privileged account '{username}'" if is_admin else f"user '{username}'"
+        l2 = (f"Multiple failed authentication attempts were observed for {acct} "
+              f"from source IP {src_ip} against host {dst_ip or host}.")
         lt, stt, wkst = pkv.get("logon_type"), pkv.get("status_code"), pkv.get("workstation")
         if lt or stt or wkst:
             seg = "The failed logon"
             if lt:
-                seg += f" used logon type {lt}"
+                lname = _LOGON_TYPES.get(str(lt))
+                seg += f" used Logon Type {lt}" + (f" ({lname})" if lname else "")
             if wkst:
                 seg += (", from" if lt else " from") + f" workstation {wkst}"
             if stt:
-                seg += (" and returned" if (lt or wkst) else " returned") + f" status code {stt}"
+                mean = _STATUS_MEANINGS.get(str(stt).lower())
+                seg += ((" and returned" if (lt or wkst) else " returned")
+                        + f" status code {stt}" + (f", indicating {mean}" if mean else ""))
             extra_lines.append(seg + ".")
+        extra_lines.append(
+            "Repeated failures against "
+            + ("a privileged/administrator account" if is_admin else "the account")
+            + " can indicate password-spraying or brute-force activity; historically, similar alerts "
+            "have often been legitimate administrator activity or stale/expired credentials and require "
+            "confirmation with the account owner.")
     elif "vpn" in ll:
         failed = [e for e in events if "fail" in (e.get("event_name") or "").lower()]
         succ = [e for e in events if "success" in (e.get("event_name") or "").lower()]
@@ -1382,25 +1414,8 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
     # Line 3 — correlation / KB / historical
     success_present = any("success" in (e.get("event_name") or "").lower()
                           or "success" in (e.get("low_level_category") or "").lower() for e in events)
-    kb_hint = None
-    if kb_matches:
-        # Try to surface an analyst-note fragment from the closest KB match
-        best = max(kb_matches, key=lambda m: float(m.get("similarity") or 0))
-        text = _html.unescape((best.get("text") or "").strip())
-        m_ = None
-        import re as _re
-        for pat in (r"\bAnalysis\s*[-:]+[\s\S]{20,400}", r"\b1\)\s*[\s\S]{20,400}", r"\bClosed[\s\S]{5,200}"):
-            m_ = _re.search(pat, text)
-            if m_:
-                break
-        if m_:
-            snippet = m_.group(0)[:280].strip()
-            snippet = _re.sub(r"\s+", " ", snippet)
-            kb_hint = f"Historical KB reference (similarity {int(float(best.get('similarity') or 0) * 100)}%): {snippet}."
     if success_present:
         lines.append({"n": len(lines) + 1, "text": "On checking the logs for the user we have observed success logins after the failed ones. Kindly check the legitimacy of the user."})
-    elif kb_hint:
-        lines.append({"n": len(lines) + 1, "text": kb_hint})
 
     # Line 4 — closing call to action
     lines.append({"n": len(lines) + 1, "text": "Verify the legitimacy of the alert with the affected user/host owner before closing."})
@@ -1430,6 +1445,13 @@ def _generate_recommendations(offense, verdict, iocs, mitre, username, src_ip, d
         recs.append(f"Review the firewall rule {policy or 'associated with this connection'} and ensure access "
                     "is restricted to authorized source networks wherever possible.")
         return recs
+    # Login-failure / brute-force / password-spray — dedicated recommendations (verdict-agnostic).
+    if _is_login_failure(desc_l, rule_l) or "spray" in rule_l or "brute" in rule_l:
+        recs.append(f"Verify the source IP {src_ip or 'of the attempts'} — confirm whether it is a known/managed host or an unexpected/external source.")
+        recs.append(f"Confirm with the account owner/administrator whether the '{username or who}' logon activity is expected and legitimate.")
+        recs.append(f"Check whether any successful logon followed the failures for '{username or who}'; if so, treat it as a potential compromise and escalate.")
+        recs.append("Monitor the account for lockout; if the source is not recognised, reset/rotate the credentials and enforce MFA.")
+        return recs[:4]
     if verdict == "TP":
         if "ransom" in desc_l or "T1486" in ttypes:
             recs.append(f"Isolate {host} from the network immediately (switch-level MAC block) and capture a memory image + disk image before shutdown.")

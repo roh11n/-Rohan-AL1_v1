@@ -1,0 +1,25 @@
+{
+  "summary": "Backend-only testing of SOCPilot IND-GLUC-10020 login-failure KB-aligned analysis fix + 3 regressions (CTI, malware persistence, proxy web-block). Created /app/backend/tests/test_iteration_19.py with 4 pytest cases and validated deterministic (rule-engine) mssp_report from the immediate investigate response. All 4 tests PASS against the public URL.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_iteration_19.py", "/app/test_reports/pytest/iter19.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "soc_engine.py login-failure branch now grounds analysis with privileged account 'Admin', src IP 45.227.254.14, host 192.168.50.22, Logon Type 3 (Network), and status 0xC000006D (bad username / invalid authentication information) — verified for offense 15a8105b.",
+    "Impact block emits exactly 3 lines covering credential-spray/unauthorized access, account compromise/internal exposure, and lockout/service disruption — verified.",
+    "Recommendations emit 4 login-failure actions: verify src IP 45.227.254.14, confirm with admin/owner, check successful logon after failures, monitor lockout/MFA/reset — verified.",
+    "'Historical KB reference' and 'Historical similar incident' text confirmed absent in all four offenses' reports.",
+    "Offense name in analysis line 1 is whitespace-normalized (no raw \\n or \\r) — verified.",
+    "Regressions preserved: CTI b3d62492 still returns 6-sentence template with source=rule-engine + llm_status=done; malware 0d75ac25 retains figma_agent.exe Run-key persistence content with 'Assess' action; proxy aa245d82 returns web-request-blocked analysis (URL + port 80) and is NOT routed to malware/persistence or CTI branches."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration_19.py"],
+  "success_rate": {"backend": "100% (4/4)", "frontend": "not tested"},
+  "test_credentials": "admin@socpilot.ai / Admin@123 (Bearer JWT via /api/auth/login)",
+  "seed_data_creation": "None (used existing offenses 15a8105b, b3d62492, 0d75ac25, aa245d82).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_iteration_19.py validates the IND-GLUC-10020 fix in the IMMEDIATE investigate response (deterministic rule-engine base). The CTI test still waits for llm_status in (done, failed). If OpenRouter free-tier 429s, the deterministic mssp_report is retained so assertions still pass. Prior test_iteration_18.py (auth/proxy/firewall branch routing) remains valid."
+}
