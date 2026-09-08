@@ -964,10 +964,8 @@ async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: l
         else:
             # CTI/IP-feed offenses intentionally use the deterministic analyst template
             # (llm_engine returns None on purpose) — this is not a failure.
-            _desc_l = str(doc.get("description") or "").lower()
-            template_bypass = ("cti" in _desc_l or "ip feed" in _desc_l or "ip feeds" in _desc_l
-                               or "rbi_ioc" in _desc_l
-                               or ("permit" in _desc_l and ("feed" in _desc_l or "cti" in _desc_l)))
+            _desc = str(doc.get("description") or "")
+            template_bypass = bool(re.search(r"\b(cti|rbi[_ ]?ioc)\b|ip[_ ]?feeds?\b", _desc, re.IGNORECASE))
             if template_bypass:
                 ai["llm_status"] = "done"
                 ai["mssp_report_source"] = "rule-engine"

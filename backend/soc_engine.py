@@ -628,8 +628,12 @@ def _generate_impact_lines(offense, events, payload_kv, src_ip, dst_ip,
     desc_l = (offense.get("description") or "").lower()
     ll = " ".join((offense.get("categories") or []) + (offense.get("rules") or [])).lower()
     host = machine_id or (payload_kv or {}).get("host") or src_ip or "the affected endpoint"
-    if ("virus" in desc_l or "malware" in ll or "behavior monitoring" in desc_l
-            or "startup program" in desc_l or "persistence" in ll or "new startup" in desc_l):
+    pkv = payload_kv or {}
+    url = pkv.get("domain_url") or pkv.get("url")
+    action = str(pkv.get("action") or "").lower()
+    if ("virus detected" in desc_l or "behavior monitoring" in desc_l
+            or "startup program" in desc_l or "persistence" in ll or "new startup" in desc_l
+            or (pkv.get("registry") and "run\\" in str(pkv.get("registry")).lower())):
         return [
             f"A new startup/autorun program was created on endpoint {host}, which could allow an "
             "application to execute automatically every time the system starts (persistence).",
@@ -639,10 +643,9 @@ def _generate_impact_lines(offense, events, payload_kv, src_ip, dst_ip,
     if "phish" in desc_l or "phish" in ll:
         return [f"User {username or 'the user'} on host {host} accessed a site categorised as phishing, "
                 "which could lead to credential theft or malware delivery if interacted with."]
-    if ("ip feed" in ll or "ip feed" in desc_l or "cti" in desc_l or "cti" in ll
-            or ("permit" in (desc_l + " " + ll) and ("feed" in desc_l or "cti" in desc_l))):
+    if _is_cti_feed(desc_l, ll):
         outbound = "outbound" in desc_l
-        nat_ip = (payload_kv or {}).get("nat_destination_ip")
+        nat_ip = pkv.get("nat_destination_ip")
         if outbound:
             return [
                 f"An internal host ({src_ip or 'source host'}) established communication with a "
@@ -660,12 +663,23 @@ def _generate_impact_lines(offense, events, payload_kv, src_ip, dst_ip,
             "Since the connection was permitted by firewall policy, the destination host was reachable "
             "from the external source IP.",
         ]
+    if url or "proxy" in ll or ("web" in ll and "url" not in ll) or "url" in ll:
+        blocked = action in ("blocked", "block", "denied", "deny", "drop")
+        if blocked:
+            return [f"The web request from host {host} to {url or dst_ip} was blocked by the proxy, so no "
+                    "compromise is expected; the block confirms the policy/threat category worked as intended."]
+        return [f"Host {host} was able to reach {url or dst_ip}; if the destination is malicious this could "
+                "lead to malware delivery, credential theft or data exposure and requires validation."]
     if "vpn" in ll or "brute" in ll or ("multiple" in desc_l and "fail" in desc_l):
         return [f"Repeated authentication activity from {src_ip or 'the source IP'} may indicate an "
                 "account-takeover or brute-force attempt against the affected account."]
     if "sql" in ll or "dam" in ll or "database" in ll:
         return [f"A database command was executed against {dst_ip or 'the target DB'}; if unauthorised it "
                 "could impact data integrity or availability."]
+    if "permit" in ll or "firewall" in ll or "traffic" in ll or action in ("allow", "accept", "permit"):
+        return [f"The firewall permitted a connection between {src_ip or 'the source'} and "
+                f"{dst_ip or 'the destination'}; if the traffic is not expected it could indicate "
+                "unauthorised access or data movement and should be validated against policy."]
     return []
 
 
@@ -861,23 +875,25 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
     "File Path (custom) C:\\..."). Custom properties are returned under "_custom"
     as [(label, value), ...] so the report can surface them as extra fields."""
     import re as _re
-    parts = [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
-    for e in events or []:
-        if e.get("event_description"):
-            parts.append(str(e["event_description"]))
-    if offense and offense.get("description"):
-        parts.append(str(offense["description"]))
-    text = "  ".join(p for p in parts if p)
+    payload_parts = [str(e.get("decoded_payload") or e.get("payload") or "") for e in events or []]
+    ev_desc = " ".join(str(e["event_description"]) for e in events or [] if e.get("event_description"))
+    payload_text = "\n".join(p for p in payload_parts if p)
+    desc_text = str(offense["description"]) if offense and offense.get("description") else ""
+    # key=value / Key: Value parsing runs ONLY on structured logs (payload + event desc),
+    # never on the free-text offense description (prevents values bleeding into it).
+    kv_source = "\n".join(x for x in [payload_text, ev_desc] if x)
+    # `text` (used for IP-label lookups + QRadar "(custom)" properties) may include the description.
+    text = "  ".join(x for x in [payload_text, ev_desc, desc_text] if x)
     if not text:
         return {}
 
     kv: dict[str, str] = {}
-    for m in _re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)=([^=]*?)(?=\s+[A-Za-z_][A-Za-z0-9_.]*=|$)", text):
+    for m in _re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)=([^=]*?)(?=\s+[A-Za-z_][A-Za-z0-9_.]*=|\s{2,}|[\n\r]|$)", kv_source):
         k = m.group(1).strip().lower()
         v = m.group(2).strip().strip('"').strip("'")
         if v and k not in kv:
             kv[k] = v
-    for m in _re.finditer(r"([A-Za-z][A-Za-z _]{1,30}?)\s*:\s*([^\n\r]+?)(?:\s{2,}|$)", text):
+    for m in _re.finditer(r"([A-Za-z][A-Za-z _]{1,30}?)\s*:\s*([^\n\r]+?)(?:\s{2,}|[\n\r]|$)", kv_source):
         k = m.group(1).strip().lower().replace(" ", "_")
         v = m.group(2).strip()
         if v and k not in kv:
@@ -993,6 +1009,11 @@ def _parse_payload_kv(events: list[dict], offense: dict | None = None) -> dict:
         "post_nat_source_ip": ev_get("postnatsourceip"),
         "post_nat_destination_ip": ev_get("postnatdestinationip"),
         "domain_url": ev_get("domain_url", "domainurl", "url") or pick("domain_url", "url", "domain", "dhost"),
+        "http_method": pick("method", "http_method", "requestmethod", "httpmethod"),
+        "url_category": pick("urlcategory", "url_category", "category", "cat", "webcategory"),
+        "logon_type": pick("logontype", "logon_type"),
+        "workstation": pick("workstationname", "workstation", "ws", "src_host"),
+        "status_code": pick("status", "substatus", "resultcode", "errorcode"),
         "content_type": ev_get("content_type", "contenttype") or pick("content_type", "contenttype"),
         "event_name": ev_get("event_name"),
         "low_level_category": ev_get("category_name") or pick("low_level_category"),
@@ -1083,6 +1104,15 @@ def _discover_extra_fields(events: list[dict]) -> list[tuple[str, str]]:
 
 
 # ---- Context-aware analysis + recommendation helpers ----
+_CTI_FEED_RE = re.compile(r"\b(cti|rbi[_ ]?ioc)\b|ip[_ ]?feeds?\b", re.IGNORECASE)
+
+
+def _is_cti_feed(*texts) -> bool:
+    """True only for genuine CTI / threat-intel IP-feed offenses (word-boundary match,
+    so it never fires on substrings like 'aCTIvity')."""
+    return any(t and _CTI_FEED_RE.search(str(t)) for t in texts)
+
+
 def _cti_feed_analysis(offense, events, src_ip, dst_ip, dt_str, log_source_str):
     """MSSP L1 narrative for CTI/threat-intel IP-feed firewall-permit offenses
     (inbound or outbound). Field-driven: each sentence is emitted only when its
@@ -1171,18 +1201,61 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
     ll = " ".join((offense.get("categories") or []) + rules).lower()
 
     # CTI IP-feed firewall permit (inbound/outbound) — dedicated MSSP narrative.
-    if ("cti" in lower_desc or "ip feed" in lower_desc or "ip feeds" in lower_desc
-            or "ip feed" in ll or "rbi_ioc" in ll
-            or ("permit" in (lower_desc + " " + ll) and ("feed" in lower_desc or "cti" in lower_desc))):
+    if _is_cti_feed(lower_desc, ll):
         return _cti_feed_analysis(offense, events, src_ip, dst_ip, dt_str, log_source_str)
 
     # Line 1 — canonical opener
     when = f" on {dt_str}" if dt_str else ""
     lines.append({"n": 1, "text": f'An offense "{desc}" was triggered{when}.'})
 
-    # Line 2 — technical detail sentence, tailored by category / evidence
+    # Line 2+ — technical detail, tailored by category and GROUNDED in extracted fields.
+    import re as _re2
+    pkv = _parse_payload_kv(events, offense)
+    payloads = " ".join(str(e.get("decoded_payload") or e.get("payload") or "") for e in events).lower()
+    host = machine_id or pkv.get("host") or pkv.get("workstation") or src_ip
+    action = pkv.get("action")
+    url = pkv.get("domain_url") or pkv.get("url")
+    app = pkv.get("application")
+    proto = pkv.get("protocol")
+    dport = pkv.get("destination_port")
+    sport = pkv.get("source_port")
+
+    def _priv(ip):
+        return bool(ip) and (str(ip).startswith("10.") or str(ip).startswith("192.168.")
+                             or bool(_re2.match(r"172\.(1[6-9]|2\d|3[01])\.", str(ip))))
+
+    def _grounded(exclude=()):  # extra sentences for artifacts not already narrated
+        s = []
+        proc = pkv.get("file_path") or pkv.get("process")
+        if proc and "process" not in exclude:
+            s.append(f"The activity involved {proc} on host {host}.")
+        if pkv.get("registry") and "registry" not in exclude:
+            s.append(f"A registry autorun entry was observed at {pkv['registry']}.")
+        if url and "url" not in exclude:
+            seg = f"The request targeted {url}"
+            if pkv.get("http_method"):
+                seg += f" using HTTP {pkv['http_method']}"
+            if pkv.get("url_category"):
+                seg += f" (category {pkv['url_category']})"
+            s.append(seg + ".")
+        if "conn" not in exclude and (dport or app or (proto and (src_ip or dst_ip))):
+            parts = []
+            if app:
+                parts.append(f"application {app}")
+            if proto:
+                parts.append(f"protocol {str(proto).upper()}")
+            seg = "The connection used " + (", ".join(parts) if parts else "the observed protocol")
+            if dport:
+                seg += f" on destination port {dport}"
+            if sport:
+                seg += f" (source port {sport})"
+            s.append(seg + ".")
+        if action and "action" not in exclude:
+            s.append(f"The device action recorded was '{action}'.")
+        return s
+
     l2 = None
-    payloads = " ".join([str(e.get("payload") or "") for e in events])
+    extra_lines: list[str] = []
 
     if "sql" in ll or "dam" in ll or "database" in ll:
         m = _extract_field(events, "process")
@@ -1190,18 +1263,36 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
         l2 = (f"Database user '{username}' from host {src_ip} executed on target DB {dst_ip}"
               + (f" via {m}" if m else "")
               + (f" the SQL command: {sql!r}." if sql else "."))
+        extra_lines = _grounded(exclude=("conn",))
     elif "phish" in lower_desc or "phish" in ll:
-        url = _extract_field(events, "url") or _scan_payload_regex(events, r"URL[:=]\s*(https?://\S+)", 1)
-        l2 = f"User '{username}' from host {src_ip} accessed the phishing URL {url}." if url else \
-             f"User '{username}' from host {src_ip} was flagged accessing a phishing category site."
-    elif "ip feed" in ll or "rbi_ioc" in ll or "permit" in ll:
-        asn = _scan_payload_regex(events, r"ASN[:=]\s*([^\n\r]+?)(?:\s{2,}|City|$)", 1)
-        port = _extract_field(events, "port") or _scan_payload_regex(events, r"Destination Port[:=]\s*(\d+)", 1)
-        l2 = (f"An inbound permitted connection was observed from source IP {src_ip}"
-              + (f" (ASN: {asn})" if asn else "")
-              + f" to destination IP {dst_ip}"
-              + (f" on port {port}" if port else "")
-              + ".")
+        l2 = (f"User '{username}' from host {src_ip} accessed the flagged URL {url}." if url
+              else f"User '{username}' from host {src_ip} was flagged accessing a phishing category site.")
+        extra_lines = _grounded(exclude=("url",))
+    elif "cloud" in ll or "upload" in ll:
+        l2 = f"User '{username}' from host {src_ip} uploaded content to {url or dst_ip}."
+        extra_lines = _grounded(exclude=("url",))
+    elif url or "proxy" in ll or "web" in ll or "url" in ll or "http" in ll:
+        verbed = {"blocked": "blocked", "block": "blocked", "denied": "blocked", "deny": "blocked",
+                  "allowed": "permitted", "allow": "permitted", "permit": "permitted"}.get(
+                      str(action or "").lower(), action or "observed")
+        who = f"user '{username}'" if username and str(username).lower() != "none" else "an internal host"
+        l2 = (f"A web request from {who} on host {src_ip} to {url or dst_ip} was {verbed}"
+              + (f" by {log_source_str}" if log_source_str else "") + ".")
+        extra_lines = _grounded(exclude=("url", "action"))
+    elif "brute" in ll or ("multiple" in lower_desc and "fail" in lower_desc) or \
+            ("fail" in ll and "logon" in str(event_name or "").lower()):
+        l2 = (f"Multiple failed authentication attempts were observed for user '{username}' "
+              f"from source IP {src_ip} against {dst_ip or host}.")
+        lt, stt, wkst = pkv.get("logon_type"), pkv.get("status_code"), pkv.get("workstation")
+        if lt or stt or wkst:
+            seg = "The failed logon"
+            if lt:
+                seg += f" used logon type {lt}"
+            if wkst:
+                seg += (", from" if lt else " from") + f" workstation {wkst}"
+            if stt:
+                seg += (" and returned" if (lt or wkst) else " returned") + f" status code {stt}"
+            extra_lines.append(seg + ".")
     elif "vpn" in ll:
         failed = [e for e in events if "fail" in (e.get("event_name") or "").lower()]
         succ = [e for e in events if "success" in (e.get("event_name") or "").lower()]
@@ -1210,48 +1301,83 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
         l2 = (f"Source IP {src_ip} attempted VPN authentication for user(s) [{', '.join(u_fail)}]"
               + (f" and successfully signed in as [{', '.join(u_succ)}]" if u_succ else "")
               + f" against VPN gateway {dst_ip}.")
-    elif "brute" in ll or ("multiple" in lower_desc and "fail" in lower_desc):
-        l2 = f"Multiple failed authentication attempts were observed for user '{username}' from source IP {src_ip} against {dst_ip}."
     elif "expired" in lower_desc or (error_code and error_code.lower() == "0xc0000224"):
-        l2 = f"The event indicates the user's password has expired (Error Code: {error_code}, Failure Reason: {failure_reason})." \
-             if failure_reason else \
-             f"The event indicates an expired-password login failure (Error Code: {error_code})."
+        l2 = (f"The event indicates the user's password has expired (Error Code: {error_code}, "
+              f"Failure Reason: {failure_reason})." if failure_reason
+              else f"The event indicates an expired-password login failure (Error Code: {error_code}).")
     elif "ransom" in ll or "ransom" in lower_desc:
         h = _first(iocs.get("sha256") or iocs.get("md5") or iocs.get("sha1"))
         l2 = f"Ransomware activity was detected on host {machine_id or dst_ip}" + (f" with file hash {h}" if h else "") + "."
-    elif "dns" in ll or "tunnel" in ll:
-        dom = _first(iocs.get("domain"))
-        l2 = f"Unusual DNS queries were observed from {src_ip}" + (f" to domain {dom}" if dom else "") + "."
-    elif "cloud" in ll or "upload" in ll:
-        url = _extract_field(events, "url")
-        l2 = f"User '{username}' from host {src_ip} uploaded content to {url or dst_ip}."
-    elif "usb" in ll or "removable" in ll:
-        l2 = f"User '{username}' wrote files to a removable device on host {machine_id or src_ip}."
-    elif ("virus" in lower_desc or "malware" in ll or "behavior monitoring" in lower_desc
-          or "startup program" in lower_desc or "persistence" in ll or "autostart" in payloads.lower()
-          or "autorun" in payloads.lower()):
-        pkv = _parse_payload_kv(events, offense)
+        extra_lines = _grounded(exclude=("conn",))
+    elif (("virus detected" in lower_desc) or ("behavior monitoring" in lower_desc)
+          or ("startup program" in lower_desc) or ("new startup" in lower_desc)
+          or ("persistence" in ll) or ("autorun" in payloads) or ("autostart" in payloads)
+          or (pkv.get("registry") and "run\\" in str(pkv.get("registry")).lower())):
         fpath = pkv.get("file_path") or pkv.get("process")
         reg = pkv.get("registry")
         act = pkv.get("action")
         op = pkv.get("operation")
-        host = machine_id or pkv.get("host") or src_ip
-        seg = f"{log_source_str.split('@')[0].strip() if log_source_str else 'The endpoint security tool'} detected a Behavior Monitoring event on host {host}"
+        h2 = machine_id or pkv.get("host") or src_ip
+        seg = (f"{log_source_str.split('@')[0].strip() if log_source_str else 'The endpoint security tool'} "
+               f"detected a Behavior Monitoring event on host {h2}")
         if reg:
             seg += f", where a new startup/autorun entry was {'written to ' if op else 'added under '}the registry key {reg}"
         if fpath:
             seg += f", pointing to the file {fpath} located in the user's directory"
         if act:
-            seg += f"; the device action taken was '{act}', meaning the tool detected and evaluated the activity per policy without automatically blocking it"
+            seg += (f"; the device action taken was '{act}', meaning the tool detected and "
+                    "evaluated the activity per policy without automatically blocking it")
         l2 = seg + "."
+    elif "usb" in ll or "removable" in ll:
+        l2 = f"User '{username}' wrote files to a removable device on host {machine_id or src_ip}."
+        extra_lines = _grounded()
+    elif ("permit" in ll or "firewall" in ll or "traffic" in ll or "accept" in ll or "deny" in ll
+          or str(action or "").lower() in ("allow", "accept", "deny", "drop", "permit")):
+        if "outbound" in lower_desc:
+            direction = "outbound"
+        elif "inbound" in lower_desc:
+            direction = "inbound"
+        elif _priv(src_ip) and not _priv(dst_ip):
+            direction = "outbound"
+        elif _priv(dst_ip) and not _priv(src_ip):
+            direction = "inbound"
+        else:
+            direction = "network"
+        fw = log_source_str.split("@")[0].strip() if log_source_str else "The firewall"
+        _verbmap = {"allow": "allowed", "accept": "accepted", "permit": "permitted",
+                    "deny": "denied", "drop": "dropped", "block": "blocked"}
+        verb = _verbmap.get(str(action or "").lower(), action or "permitted")
+        art = "an" if direction and direction[0] in "aeiou" else "a"
+        l2 = (f"{fw} {verb} {art} {direction} {(app + ' ') if app else ''}connection from {src_ip} to {dst_ip}"
+              + (f" over {str(proto).upper()} port {dport}" if dport else "") + ".")
+        pol = pkv.get("policy_name") or pkv.get("rule_name")
+        if pol:
+            extra_lines.append(f"The traffic matched firewall policy {pol}.")
+        if pkv.get("source_zone") and pkv.get("dest_zone"):
+            extra_lines.append(f"It traversed from zone {pkv['source_zone']} to zone {pkv['dest_zone']}.")
+        if pkv.get("bytes") or pkv.get("packets"):
+            seg = "The session"
+            if pkv.get("bytes"):
+                seg += f" transferred {pkv['bytes']} bytes"
+            if pkv.get("packets"):
+                seg += (" across" if pkv.get("bytes") else " comprised") + f" {pkv['packets']} packets"
+            extra_lines.append(seg + ".")
+    elif "tunnel" in ll or "dns tunnel" in lower_desc or ("dns" in ll and "exfil" in ll):
+        dom = _first(iocs.get("domain")) or url
+        l2 = f"Unusual DNS activity was observed from {src_ip}" + (f" to {dom}" if dom else "") + "."
+        extra_lines = _grounded(exclude=("url",))
     elif event_name:
         who = f"user '{username}'" if username and str(username).lower() != "none" else "the endpoint"
         dst_seg = f" to {dst_ip}" if dst_ip else ""
         l2 = (f"The event '{event_name}' was observed for {who} from {src_ip}{dst_seg}"
               + (f" via {log_source_str}" if log_source_str else "") + ".")
+        extra_lines = _grounded()
     else:
         l2 = f"Rule(s) triggered: {', '.join(rules) or 'unspecified'}."
+        extra_lines = _grounded()
     lines.append({"n": 2, "text": l2})
+    for s in extra_lines:
+        lines.append({"n": len(lines) + 1, "text": s})
 
     # Line 3 — correlation / KB / historical
     success_present = any("success" in (e.get("event_name") or "").lower()
@@ -1272,9 +1398,9 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
             snippet = _re.sub(r"\s+", " ", snippet)
             kb_hint = f"Historical KB reference (similarity {int(float(best.get('similarity') or 0) * 100)}%): {snippet}."
     if success_present:
-        lines.append({"n": 3, "text": "On checking the logs for the user we have observed success logins after the failed ones. Kindly check the legitimacy of the user."})
+        lines.append({"n": len(lines) + 1, "text": "On checking the logs for the user we have observed success logins after the failed ones. Kindly check the legitimacy of the user."})
     elif kb_hint:
-        lines.append({"n": 3, "text": kb_hint})
+        lines.append({"n": len(lines) + 1, "text": kb_hint})
 
     # Line 4 — closing call to action
     lines.append({"n": len(lines) + 1, "text": "Verify the legitimacy of the alert with the affected user/host owner before closing."})
@@ -1293,8 +1419,7 @@ def _generate_recommendations(offense, verdict, iocs, mitre, username, src_ip, d
 
     recs: list[str] = []
     # CTI / threat-intel IP-feed firewall-permit — dedicated recommendations (verdict-agnostic).
-    if ("cti" in desc_l or "ip feed" in desc_l or "ip feed" in rule_l or "rbi_ioc" in rule_l
-            or ("permit" in (desc_l + " " + rule_l) and ("feed" in desc_l or "cti" in desc_l))):
+    if _is_cti_feed(desc_l, rule_l):
         pkv = _parse_payload_kv(offense.get("events") or [], offense)
         outbound = "outbound" in desc_l
         cti_ip = (dst_ip if outbound else src_ip) or ext_ip or "the flagged IP"

@@ -1,0 +1,26 @@
+{
+  "summary": "Backend-only testing of SOCPilot soc_engine fixes for 3 NEW offenses (auth 2d819087, proxy aa245d82, firewall-permit 74733a74) plus regressions for CTI b3d62492 and UC-00508 0d75ac25. Created /app/backend/tests/test_iteration_18.py with 5 pytest cases asserting grounded field extraction (logon type/workstation/status; URL/method/port; policy/zones/bytes/packets), correct branch routing (no malware/persistence wording in proxy report, no DNS-tunnel/CTI routing for firewall-permit, no CTI 'internally hosted service' in impact), clean field extraction (no offense-description bleed into aged-out session_end_reason), absence of 'Historical similar incident' text, and preservation of the CTI 6-sentence analyst template + UC-00508 persistence content. All 5 tests PASS against public URL. Login flakiness observed once (Cloudflare 502 while backend was restarting from OpenRouter 429 loop) — resolved on retry.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "background LLM (OpenRouter free)", "issue": "Frequent 429 Too Many Requests seen in /var/log/supervisor/backend.err.log for openrouter/free during test runs. Rule-engine fallback correctly retains deterministic report, so no functional regression, but noise in logs. Consider backoff/circuit-breaker."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_iteration_18.py", "/app/test_reports/pytest/iter18.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "soc_engine.py branch-routing fixes verified: proxy/web offense no longer misroutes to malware/persistence branch, and CTI substring match is now word-bounded (no false positive on 'aCTIvity').",
+    "Firewall-permit branch now emits grammatical grounded sentence and pulls policy/zones/bytes/packets — verified for offense 74733a74.",
+    "Auth branch grounds logon type / workstation / status code — verified for offense 2d819087.",
+    "Payload key=value parser correctly restricts to payload+event_description (no bleed from offense description into aged-out value) — verified.",
+    "'Historical similar incident' text confirmed absent across all 5 offenses' reports."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration_18.py"],
+  "success_rate": {"backend": "100%", "frontend": "not tested"},
+  "test_credentials": "admin@socpilot.ai / Admin@123 (Bearer JWT via /api/auth/login)",
+  "seed_data_creation": "None (used existing offenses 2d819087, aa245d82, 74733a74, b3d62492, 0d75ac25 already seeded under client 'Acme Financial').",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_iteration_18.py covers 3 new offense branches + CTI + UC-00508 regressions. CTI test waits for llm_status in (done, failed) and asserts source=rule-engine. UC-00508 uses 170s timeout for background LLM. If OpenRouter free tier is rate-limited (429), rule-engine fallback still populates mssp_report deterministically so all assertions still pass — this is expected behavior per soc_engine template-bypass."
+}

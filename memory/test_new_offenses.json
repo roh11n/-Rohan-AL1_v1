@@ -1,0 +1,75 @@
+{
+  "offenses": [
+    {
+      "description": "Multiple Failed Login Attempts Followed by Success",
+      "severity_label": "High",
+      "severity": 7,
+      "categories": ["Authentication Failure"],
+      "rules": ["Brute Force Login"],
+      "source_ips": ["10.20.30.40"],
+      "destination_ips": ["10.20.30.9"],
+      "usernames": ["jdoe"],
+      "start_time": "2026-08-15T09:12:00Z",
+      "qradar_offense_id": 990001,
+      "events": [
+        {
+          "eventname": "Failed Logon",
+          "logsourcename": "Microsoft Windows Security Event Log @ 10.20.30.9",
+          "sourceip": "10.20.30.40",
+          "destinationip": "10.20.30.9",
+          "username": "jdoe",
+          "category": "Authentication Failure",
+          "decoded_payload": "<13>Aug 15 09:12:03 DC01.corp.local EventID=4625 TargetUserName=jdoe TargetDomainName=CORP LogonType=3 WorkstationName=WS-FIN-12 IpAddress=10.20.30.40 IpPort=51844 Status=0xC000006D SubStatus=0xC000006A ProcessName=C:\\Windows\\System32\\lsass.exe AuthenticationPackageName=NTLM"
+        }
+      ]
+    },
+    {
+      "description": "Proxy Blocked Access to Malware Category URL",
+      "severity_label": "Medium",
+      "severity": 5,
+      "categories": ["Suspicious Web Activity"],
+      "rules": ["Malware URL Access"],
+      "source_ips": ["10.5.6.7"],
+      "destination_ips": ["185.100.2.3"],
+      "usernames": ["asmith"],
+      "start_time": "2026-08-15T10:30:00Z",
+      "qradar_offense_id": 990002,
+      "events": [
+        {
+          "eventname": "URL Blocked",
+          "logsourcename": "Zscaler NSS @ 10.9.9.9",
+          "sourceip": "10.5.6.7",
+          "destinationip": "185.100.2.3",
+          "username": "asmith",
+          "category": "Suspicious Web Activity",
+          "decoded_payload": "action=blocked url=http://malicious.example.com/dropper.exe host=malicious.example.com user=asmith src=10.5.6.7 dst=185.100.2.3 dstport=80 proto=tcp method=GET urlcategory=Malware useragent=Mozilla/5.0 reason=threat_detected"
+        }
+      ]
+    },
+    {
+      "description": "Palo Alto Firewall Permitted Outbound DNS",
+      "severity_label": "Low",
+      "severity": 3,
+      "categories": ["Firewall Permit"],
+      "rules": ["Allow Outbound DNS"],
+      "source_ips": ["10.1.1.5"],
+      "destination_ips": ["8.8.8.8"],
+      "usernames": [],
+      "start_time": "2026-08-15T11:00:00Z",
+      "qradar_offense_id": 990003,
+      "events": [
+        {
+          "eventname": "Traffic Allowed",
+          "logsourcename": "Palo Alto PA-VM @ 172.16.0.5",
+          "sourceip": "10.1.1.5",
+          "destinationip": "8.8.8.8",
+          "sourceport": 51000,
+          "destinationport": 53,
+          "protocolname": "udp",
+          "category": "Firewall Permit",
+          "decoded_payload": "TRAFFIC action=allow src=10.1.1.5 dst=8.8.8.8 sport=51000 dport=53 proto=udp app=dns rule=Allow-Outbound-DNS srczone=Trust dstzone=Untrust bytes=214 packets=2 sessionid=778812 sessionendreason=aged-out"
+        }
+      ]
+    }
+  ]
+}

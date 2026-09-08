@@ -908,9 +908,8 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
     started = time.time()
     # CTI / threat-intel IP-feed firewall-permit offenses use a fixed analyst template
     # (deterministic, field-driven) — keep it exact and skip LLM rewording.
-    _desc_l = str(offense.get("description") or "").lower()
-    if ("cti" in _desc_l or "ip feed" in _desc_l or "ip feeds" in _desc_l or "rbi_ioc" in _desc_l
-            or ("permit" in _desc_l and ("feed" in _desc_l or "cti" in _desc_l))):
+    _desc = str(offense.get("description") or "")
+    if re.search(r"\b(cti|rbi[_ ]?ioc)\b|ip[_ ]?feeds?\b", _desc, re.IGNORECASE):
         return None
     try:
         from kb_template import build_fieldmap, fix_direction, ground_sentence
