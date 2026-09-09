@@ -1350,16 +1350,31 @@ def _generate_analysis_lines(offense, events, similar, kb_matches, iocs, mitre,
         act = pkv.get("action")
         op = pkv.get("operation")
         h2 = machine_id or pkv.get("host") or src_ip
-        seg = (f"{log_source_str.split('@')[0].strip() if log_source_str else 'The endpoint security tool'} "
-               f"detected a Behavior Monitoring event on host {h2}")
+        tool = log_source_str.split("@")[0].strip() if log_source_str else "The endpoint security tool"
+        who = (f" for user '{username}'" if username and str(username).lower() != "none" else "")
+        l2 = (f"{tool} detected a Behavior Monitoring event on host {h2}{who}, "
+              "related to the creation of a new startup/autorun program.")
         if reg:
-            seg += f", where a new startup/autorun entry was {'written to ' if op else 'added under '}the registry key {reg}"
+            extra_lines.append(
+                f"A new startup entry was {'written to' if op else 'added under'} the registry key {reg}"
+                + (f", pointing to the file {fpath}" if fpath else "") + ".")
+        elif fpath:
+            extra_lines.append(f"The detected file is {fpath}.")
         if fpath:
-            seg += f", pointing to the file {fpath} located in the user's directory"
+            low = str(fpath).lower().replace("/", "\\").replace("\\\\", "\\")
+            loc = ("the user's temporary directory" if "\\temp\\" in low or "\\tmp\\" in low
+                   else "the user's local application-data directory" if "appdata\\local" in low
+                   else "the user's roaming application-data directory" if "appdata\\roaming" in low
+                   else "a user-writable profile directory" if "\\users\\" in low else None)
+            if loc:
+                extra_lines.append(f"The file resides in {loc}, which is used by both legitimate "
+                                   "installers and malware and therefore requires validation.")
         if act:
-            seg += (f"; the device action taken was '{act}', meaning the tool detected and "
-                    "evaluated the activity per policy without automatically blocking it")
-        l2 = seg + "."
+            extra_lines.append(f"The device action was '{act}', meaning {tool} detected and evaluated "
+                               "the activity per policy without automatically blocking or removing it.")
+        extra_lines.append("Based on the available logs there is no evidence that the file is confirmed "
+                           "malicious or that the endpoint has been compromised; the activity requires "
+                           "validation before closure.")
     elif "usb" in ll or "removable" in ll:
         l2 = f"User '{username}' wrote files to a removable device on host {machine_id or src_ip}."
         extra_lines = _grounded()

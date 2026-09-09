@@ -1,0 +1,21 @@
+{
+  "summary": "Backend-only testing of UC-00508 malware/persistence multi-line grounded analysis in the deterministic (rule-engine) FALLBACK — the exact code path used when OpenRouter LLM is rate-limited (429). Created /app/backend/tests/test_iteration_20.py with 3 pytest cases (UC-00508 multi-line + login-failure + CTI regressions). All 3 tests PASS against the public URL.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_iteration_20.py", "/app/test_reports/pytest/iter20.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "soc_engine._generate_analysis_lines malware/persistence branch (lines 1344-1377) now emits >=5 discrete grounded lines: (1) 'Trend Micro Apex Central detected a Behavior Monitoring event on host LTWGSLVAP1424 for user...', (2) 'A new startup entry was written to the registry key HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Figma Agent, pointing to the file ...\\figma_agent.exe.', (3) file-location line normalizing backslashes to detect AppData\\Local vs Roaming vs Temp vs profile ('user's local application-data directory ... requires validation'), (4) device-action explanation ('Assess', meaning ... detected and evaluated per policy without automatically blocking or removing it), (5) no-confirmed-compromise conclusion — verified for offense 0d75ac25 with mssp_report_source=rule-engine.",
+    "_generate_impact_lines persistence branch still emits both required lines: (a) 'new startup/autorun program ... persistence' and (b) 'no evidence of confirmed malware infection or endpoint compromise; requires validation' — verified.",
+    "_generate_recommendations persistence branch still emits >=4 actions: verify figma_agent.exe legitimacy, review startup/registry autorun/scheduled tasks, full AV/EDR scan, remove persistence/delete file if malicious — verified.",
+    "Regressions preserved: login-failure 15a8105b keeps Admin/45.227.254.14/192.168.50.22/Logon Type 3 Network/0xC000006D/credential-spray framing with 3 impact lines and >=4 recs; CTI b3d62492 still returns 6-line template with source=rule-engine after llm settles.",
+    "'Historical KB reference' and 'Historical similar incident' phrases confirmed absent in all three offenses' full report text (analysis + impact + recommendations)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration_20.py"],
+  "success_rate": {"backend": "100% (3/3)", "frontend": "not tested"},
+  "test_credentials": "admin@socpilot.ai / Admin@123 (Bearer JWT via /api/auth/login)",
+  "seed_data_creation": "None (used existing seeded offenses 0d75ac25, 15a8105b, b3d62492).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_iteration_20.py asserts the UC-00508 deterministic fallback matches the reference multi-line analysis quality. It reads the IMMEDIATE investigate response (or one GET follow-up) so it does NOT depend on OpenRouter LLM success — exactly reflecting the 429-fallback scenario. If OpenRouter later succeeds it only enriches. Prior test_iteration_18.py (branch routing) and test_iteration_19.py (login-failure) remain valid regressions."
+}
