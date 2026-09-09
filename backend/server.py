@@ -836,7 +836,18 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     settings_doc = await db.settings.find_one({"id": "global"}, {"_id": 0}) or {}
     llm_cfg = settings_doc.get("llm", {})
     ti_cfg = settings_doc.get("threat_intel", {})
-    analysis_mode = (llm_cfg.get("analysis_mode") or ("llm" if llm_cfg.get("enable_llm") else "kb")).lower()
+    analysis_mode_raw = (llm_cfg.get("analysis_mode") or ("llm" if llm_cfg.get("enable_llm") else "kb")).lower()
+    or_key = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+    # Three selectable engines: kb (deterministic template only, no LLM overwrite),
+    # local (on-box Qwen), openrouter (cloud). Legacy "llm" -> openrouter if key else local.
+    if analysis_mode_raw in ("kb", "rule", "rule-engine", "template"):
+        analysis_mode, llm_provider = "kb", None
+    elif analysis_mode_raw == "local":
+        analysis_mode, llm_provider = "llm", "local"
+    elif analysis_mode_raw in ("openrouter", "or", "cloud"):
+        analysis_mode, llm_provider = "llm", "openrouter"
+    else:
+        analysis_mode, llm_provider = "llm", ("openrouter" if or_key else "local")
 
     # The MSSP report is the LLM target (generated in the background for LLM mode).
     # We do NOT run a blocking narrative LLM call here — it would stall the request.
@@ -961,9 +972,11 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
     await db.offenses.update_one({"id": offense_id}, {"$set": updates})
     await _audit(user["email"], "investigate", "offense", offense_id, {"risk": analysis["risk_score"]})
     if schedule_llm:
-        model_name = llm_cfg.get("model_name") or "Qwen/Qwen2.5-0.5B-Instruct"
-        if os.environ.get("OPENROUTER_API_KEY", "").strip():
-            model_name = os.environ.get("OPENROUTER_MODEL") or model_name
+        if llm_provider == "openrouter":
+            model_name = os.environ.get("OPENROUTER_MODEL") or "openrouter/free"
+        else:  # local
+            m = llm_cfg.get("model_name") or "Qwen/Qwen2.5-0.5B-Instruct"
+            model_name = "Qwen/Qwen2.5-0.5B-Instruct" if (m == "openrouter/free" or m.endswith(":free")) else m
         timeout = int(llm_cfg.get("llm_step_timeout_seconds") or 240)
         temperature = float(llm_cfg.get("temperature") or 0.3)
         # Base for the LLM = the report just built (KB-template when a use-case matched,
@@ -973,7 +986,7 @@ async def investigate_offense(offense_id: str, user: dict = Depends(require_role
         llm_base.pop("llm_status", None)
         asyncio.create_task(_run_llm_report_bg(
             offense_id, doc, doc.get("events") or [], llm_kb, llm_base,
-            model_name, temperature, max(300, timeout), vt_ioc, kb_ref))
+            model_name, temperature, max(300, timeout), vt_ioc, kb_ref, llm_provider))
     new_doc = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
     return new_doc
 
@@ -982,15 +995,16 @@ async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: l
                              rule_engine_mssp: dict, model_name: str,
                              temperature: float, timeout: int,
                              ioc_enrichment: dict | None = None,
-                             kb_ref: dict | None = None):
-    """Background: run the local Qwen one-shot and patch the offense's MSSP report."""
+                             kb_ref: dict | None = None,
+                             provider: str | None = None):
+    """Background: run the selected LLM (local Qwen or OpenRouter) one-shot and patch the report."""
     try:
         import llm_engine  # heavy transformers stack — lazy
         loop = asyncio.get_event_loop()
         llm_mssp = await loop.run_in_executor(
             None, llm_engine.build_llm_mssp_report_oneshot,
             doc, events, llm_kb, rule_engine_mssp, model_name, temperature, timeout,
-            ioc_enrichment, kb_ref)
+            ioc_enrichment, kb_ref, provider)
         cur = await db.offenses.find_one({"id": offense_id}, {"_id": 0})
         if not cur:
             return
@@ -998,7 +1012,7 @@ async def _run_llm_report_bg(offense_id: str, doc: dict, events: list, llm_kb: l
         if llm_mssp:
             llm_mssp["llm_status"] = "done"
             ai["mssp_report"] = llm_mssp
-            ai["mssp_report_source"] = "llm"
+            ai["mssp_report_source"] = f"llm:{provider}" if provider else "llm"
             ai["llm_status"] = "done"
         else:
             # CTI/IP-feed offenses intentionally use the deterministic analyst template

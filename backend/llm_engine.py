@@ -138,15 +138,18 @@ def _openrouter_chat(model_name: str, messages: list[dict], max_new_tokens: int,
 # Inference primitive                                                         #
 # --------------------------------------------------------------------------- #
 def _chat_once(model_name: str, messages: list[dict], max_new_tokens: int,
-               temperature: float) -> str | None:
+               temperature: float, provider: str | None = None) -> str | None:
     """Single chat-format inference.
 
-    When OPENROUTER_API_KEY is set, inference is served by the OpenRouter cloud
-    API (OpenAI-compatible) using OPENROUTER_MODEL. Otherwise it falls back to the
-    local HuggingFace transformers model. Returns generated text (assistant reply).
+    provider: 'openrouter' forces the OpenRouter cloud API; 'local' forces the local
+    HuggingFace model; None auto-selects OpenRouter when OPENROUTER_API_KEY is set.
+    Returns generated text (assistant reply).
     """
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if api_key:
+    use_openrouter = (provider == "openrouter") or (provider is None and bool(api_key))
+    if provider == "local":
+        use_openrouter = False
+    if use_openrouter and api_key:
         return _openrouter_chat(model_name, messages, max_new_tokens,
                                 temperature, api_key)
     loaded = _load(model_name)
@@ -174,10 +177,10 @@ def _chat_once(model_name: str, messages: list[dict], max_new_tokens: int,
 
 def _chat_with_timeout(model_name: str, messages: list[dict],
                         max_new_tokens: int, temperature: float,
-                        timeout_seconds: int) -> str | None:
+                        timeout_seconds: int, provider: str | None = None) -> str | None:
     """Run one chat inference in the single-worker thread pool with a hard cap."""
     future = _EXECUTOR.submit(_chat_once, model_name, messages,
-                              max_new_tokens, temperature)
+                              max_new_tokens, temperature, provider)
     try:
         return future.result(timeout=timeout_seconds)
     except FuturesTimeout:
@@ -897,7 +900,8 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
                                   temperature: float = 0.3,
                                   timeout_seconds: int = 240,
                                   ioc_enrichment: dict | None = None,
-                                  kb_ref: dict | None = None) -> dict | None:
+                                  kb_ref: dict | None = None,
+                                  provider: str | None = None) -> dict | None:
     """Local-LLM MSSP L1 report, generated SECTION BY SECTION (small-model friendly):
     Analysis -> Impact -> Recommendations+Verdict. When the use case matches the KB, the
     consolidated analyst knowledge (ITSM analysis/impact/recommendations across all
@@ -950,7 +954,8 @@ def build_llm_mssp_report_oneshot(offense: dict, events: list[dict],
                     model_name,
                     [{"role": "system", "content": role},
                      {"role": "user", "content": context + task}],
-                    max_new_tokens=max_tokens, temperature=temp, timeout_seconds=timeout_seconds)
+                    max_new_tokens=max_tokens, temperature=temp,
+                    timeout_seconds=timeout_seconds, provider=provider)
                 if r and r.strip():
                     return r
             return None
